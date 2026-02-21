@@ -33,10 +33,6 @@ func (m *mockSlackAPI) GetConversationInfo(_ *slack.GetConversationInfoInput) (*
 	return &slack.Channel{}, nil
 }
 
-func (m *mockSlackAPI) GetUserInfo(userID string) (*slack.User, error) {
-	return &slack.User{ID: userID, Name: "testuser"}, nil
-}
-
 func (m *mockSlackAPI) AuthTest() (*slack.AuthTestResponse, error) {
 	return &slack.AuthTestResponse{UserID: "U123BOT"}, nil
 }
@@ -114,15 +110,14 @@ func TestNewHandler(t *testing.T) {
 }
 
 func TestSafeSlackClient_ChannelAllowlist(t *testing.T) {
-	mock := &mockSlackAPI{}
 	logger := zerolog.Nop()
 
 	t.Run("allowed channel", func(t *testing.T) {
+		mock := &mockSlackAPI{}
 		mw := NewMiddleware(logger, 10, time.Minute)
 		h := NewHandler(logger, mw)
 		h.api = mock
 
-		// Simulate allowlist behavior — PostMessage should succeed for allowed channels
 		err := h.SendApprovalRequest(context.Background(), "C_ALLOWED", "req-1", "U1", "deploy", "api")
 		require.NoError(t, err)
 	})
@@ -142,12 +137,4 @@ func TestSafeSlackClient_ChannelAllowlist(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "not in the allowed channels list")
 	})
-}
-
-func TestSafeSlackClient_GetUserInfo(t *testing.T) {
-	// Verify GetUserInfo is available (single lookup, not bulk)
-	mock := &mockSlackAPI{}
-	user, err := mock.GetUserInfo("U12345")
-	require.NoError(t, err)
-	assert.Equal(t, "U12345", user.ID)
 }

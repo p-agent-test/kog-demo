@@ -67,10 +67,10 @@ External (Kog/OpenClaw)              Agent Runtime (Trusted)
 - **Mitigation:** Channel allowlist (`SLACK_ALLOWED_CHANNELS` env — fail-closed), user-level supervisor policies
 - **Detection:** Audit log shows unknown user IDs
 
-### Threat 6: Bulk User Enumeration
-- **Risk:** `users:read` scope allows listing all workspace users
-- **Mitigation:** Code-level restriction — `users.list` API is NOT exposed via `BotAPI` interface. Only `GetUserInfo(userID)` for single lookups. `SafeSlackClient` enforces this at the wrapper level.
-- **Detection:** N/A — bulk call is structurally impossible through our client
+### Threat 6: User Enumeration
+- **Risk:** Slack API could allow listing workspace users
+- **Mitigation:** `users:read` scope removed entirely. Bot has no user lookup capability — uses Slack mention format (`<@U123>`) instead. No user data is ever fetched or stored.
+- **Detection:** N/A — scope not granted, API not available
 
 ## Network Policy
 

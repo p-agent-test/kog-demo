@@ -10,12 +10,12 @@ import (
 )
 
 // BotAPI abstracts the Slack API client for testing.
-// SECURITY: Only safe methods are exposed. users.list is intentionally excluded
-// to prevent bulk workspace user enumeration. Use GetUserInfo for single lookups.
+// SECURITY: Only safe methods are exposed. No user enumeration APIs —
+// users:read scope removed entirely. Bot uses Slack mention format (<@U123>)
+// and never resolves user names.
 type BotAPI interface {
 	PostMessage(channelID string, options ...slack.MsgOption) (string, string, error)
 	GetConversationInfo(input *slack.GetConversationInfoInput) (*slack.Channel, error)
-	GetUserInfo(userID string) (*slack.User, error)
 	AuthTest() (*slack.AuthTestResponse, error)
 }
 
@@ -56,11 +56,6 @@ func (s *SafeSlackClient) PostMessage(channelID string, options ...slack.MsgOpti
 // GetConversationInfo returns channel info (read-only, safe).
 func (s *SafeSlackClient) GetConversationInfo(input *slack.GetConversationInfoInput) (*slack.Channel, error) {
 	return s.inner.GetConversationInfo(input)
-}
-
-// GetUserInfo returns info for a single user by ID (safe — no bulk enumeration).
-func (s *SafeSlackClient) GetUserInfo(userID string) (*slack.User, error) {
-	return s.inner.GetUserInfo(userID)
 }
 
 // AuthTest tests the bot token.
