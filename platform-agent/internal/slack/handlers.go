@@ -21,6 +21,7 @@ type MessageForwarder interface {
 // Regular messages are forwarded to Kog-2 via the MessageForwarder (bridge).
 type Handler struct {
 	api        BotAPI
+	socket     *socketmode.Client
 	logger     zerolog.Logger
 	middleware *Middleware
 	forwarder  MessageForwarder
@@ -39,6 +40,11 @@ func (h *Handler) SetForwarder(f MessageForwarder) {
 	h.forwarder = f
 }
 
+// SetSocket sets the Socket Mode client for acknowledging events.
+func (h *Handler) SetSocket(s *socketmode.Client) {
+	h.socket = s
+}
+
 // HandleEvent routes Socket Mode events to the appropriate handler.
 func (h *Handler) HandleEvent(ctx context.Context, evt socketmode.Event) {
 	switch evt.Type {
@@ -53,8 +59,14 @@ func (h *Handler) HandleEvent(ctx context.Context, evt socketmode.Event) {
 
 // handleEventsAPI processes Events API payloads (messages, app_mention, etc.).
 func (h *Handler) handleEventsAPI(ctx context.Context, evt socketmode.Event) {
+	// Acknowledge the event first — Slack requires this within 3 seconds
+	if h.socket != nil && evt.Request != nil {
+		h.socket.Ack(*evt.Request)
+	}
+
 	eventsAPIEvent, ok := evt.Data.(slackevents.EventsAPIEvent)
 	if !ok {
+		h.logger.Warn().Str("type", string(evt.Type)).Msg("failed to cast events_api data")
 		return
 	}
 
@@ -89,10 +101,20 @@ func (h *Handler) handleCallbackEvent(ctx context.Context, innerEvent slackevent
 				h.forwarder.HandleMessage(ctx, ev.Channel, ev.User, ev.Text, ev.ThreadTimeStamp)
 			}
 		}
+
+	default:
+		h.logger.Debug().
+			Str("inner_type", innerEvent.Type).
+			Msg("unhandled callback event type")
 	}
 }
 
 func (h *Handler) handleInteraction(ctx context.Context, evt socketmode.Event) {
+	// Acknowledge interactive event
+	if h.socket != nil && evt.Request != nil {
+		h.socket.Ack(*evt.Request)
+	}
+
 	callback, ok := evt.Data.(slack.InteractionCallback)
 	if !ok {
 		return

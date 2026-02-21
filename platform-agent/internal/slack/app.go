@@ -82,6 +82,7 @@ func NewApp(botToken, appToken string, allowedChannels []string, logger zerolog.
 	api := NewSafeSlackClient(rawAPI, allowedChannels, logger)
 	socket := socketmode.New(rawAPI)
 	handler.api = api
+	handler.SetSocket(socket)
 
 	return &App{
 		api:     api,
