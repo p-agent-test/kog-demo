@@ -1,0 +1,179 @@
+package slack
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	"github.com/rs/zerolog"
+	"github.com/slack-go/slack"
+	"github.com/slack-go/slack/slackevents"
+	"github.com/slack-go/slack/socketmode"
+)
+
+// MessageForwarder receives inbound Slack messages and forwards them to Kog-2.
+type MessageForwarder interface {
+	HandleMessage(ctx context.Context, channelID, userID, text, threadTS string)
+}
+
+// Handler processes Slack events.
+// Interactive callbacks (approval buttons) are handled inline.
+// Regular messages are forwarded to Kog-2 via the MessageForwarder (bridge).
+type Handler struct {
+	api        BotAPI
+	logger     zerolog.Logger
+	middleware *Middleware
+	forwarder  MessageForwarder
+}
+
+// NewHandler creates a new event handler.
+func NewHandler(logger zerolog.Logger, middleware *Middleware) *Handler {
+	return &Handler{
+		logger:     logger.With().Str("component", "slack.handler").Logger(),
+		middleware: middleware,
+	}
+}
+
+// SetForwarder sets the message forwarder (bridge) for routing messages to Kog-2.
+func (h *Handler) SetForwarder(f MessageForwarder) {
+	h.forwarder = f
+}
+
+// HandleEvent routes Socket Mode events to the appropriate handler.
+func (h *Handler) HandleEvent(ctx context.Context, evt socketmode.Event) {
+	switch evt.Type {
+	case socketmode.EventTypeEventsAPI:
+		h.handleEventsAPI(ctx, evt)
+	case socketmode.EventTypeInteractive:
+		h.handleInteraction(ctx, evt)
+	default:
+		h.logger.Debug().Str("type", string(evt.Type)).Msg("unhandled event type")
+	}
+}
+
+// handleEventsAPI processes Events API payloads (messages, app_mention, etc.).
+func (h *Handler) handleEventsAPI(ctx context.Context, evt socketmode.Event) {
+	eventsAPIEvent, ok := evt.Data.(slackevents.EventsAPIEvent)
+	if !ok {
+		return
+	}
+
+	switch eventsAPIEvent.Type {
+	case slackevents.CallbackEvent:
+		h.handleCallbackEvent(ctx, eventsAPIEvent.InnerEvent)
+	}
+}
+
+func (h *Handler) handleCallbackEvent(ctx context.Context, innerEvent slackevents.EventsAPIInnerEvent) {
+	switch ev := innerEvent.Data.(type) {
+	case *slackevents.AppMentionEvent:
+		h.logger.Info().
+			Str("user", ev.User).
+			Str("channel", ev.Channel).
+			Str("text", ev.Text).
+			Msg("app mention received")
+
+		if h.forwarder != nil {
+			h.forwarder.HandleMessage(ctx, ev.Channel, ev.User, ev.Text, ev.ThreadTimeStamp)
+		}
+
+	case *slackevents.MessageEvent:
+		// Only handle DMs (im) — channel messages require @mention (AppMentionEvent)
+		if ev.ChannelType == "im" {
+			h.logger.Info().
+				Str("user", ev.User).
+				Str("channel", ev.Channel).
+				Msg("DM received")
+
+			if h.forwarder != nil {
+				h.forwarder.HandleMessage(ctx, ev.Channel, ev.User, ev.Text, ev.ThreadTimeStamp)
+			}
+		}
+	}
+}
+
+func (h *Handler) handleInteraction(ctx context.Context, evt socketmode.Event) {
+	callback, ok := evt.Data.(slack.InteractionCallback)
+	if !ok {
+		return
+	}
+
+	for _, action := range callback.ActionCallback.BlockActions {
+		h.logger.Info().
+			Str("action", action.ActionID).
+			Str("user", callback.User.ID).
+			Msg("interaction received")
+
+		switch {
+		case strings.HasPrefix(action.ActionID, "approve_"):
+			h.handleApproval(ctx, callback, action, true)
+		case strings.HasPrefix(action.ActionID, "deny_"):
+			h.handleApproval(ctx, callback, action, false)
+		case strings.HasPrefix(action.ActionID, "policy_approve_"):
+			h.handleApproval(ctx, callback, action, true)
+		case strings.HasPrefix(action.ActionID, "policy_deny_"):
+			h.handleApproval(ctx, callback, action, false)
+		}
+	}
+}
+
+func (h *Handler) handleApproval(_ context.Context, callback slack.InteractionCallback, action *slack.BlockAction, approved bool) {
+	status := "✅ Approved"
+	if !approved {
+		status = "❌ Denied"
+	}
+
+	h.logger.Info().
+		Str("action_id", action.ActionID).
+		Str("user", callback.User.ID).
+		Bool("approved", approved).
+		Msg("approval action")
+
+	if h.api == nil {
+		return
+	}
+
+	_, _, _ = h.api.PostMessage(
+		callback.Channel.ID,
+		slack.MsgOptionText(
+			fmt.Sprintf("%s by <@%s>", status, callback.User.ID),
+			false,
+		),
+		slack.MsgOptionTS(callback.MessageTs),
+	)
+}
+
+// SendApprovalRequest sends an interactive approval message to the supervisor channel.
+func (h *Handler) SendApprovalRequest(ctx context.Context, channelID, requestID, userID, action, resource string) error {
+	blocks := []slack.Block{
+		slack.NewSectionBlock(
+			slack.NewTextBlockObject("mrkdwn",
+				fmt.Sprintf("🔐 *Access Request*\n*User:* <@%s>\n*Action:* %s\n*Resource:* %s",
+					userID, action, resource),
+				false, false),
+			nil, nil,
+		),
+		slack.NewActionBlock(
+			"approval_actions",
+			slack.NewButtonBlockElement(
+				fmt.Sprintf("approve_%s", requestID),
+				"approve",
+				slack.NewTextBlockObject("plain_text", "✅ Approve", false, false),
+			),
+			slack.NewButtonBlockElement(
+				fmt.Sprintf("deny_%s", requestID),
+				"deny",
+				slack.NewTextBlockObject("plain_text", "❌ Deny", false, false),
+			),
+		),
+	}
+
+	_, _, err := h.api.PostMessage(
+		channelID,
+		slack.MsgOptionBlocks(blocks...),
+	)
+	if err != nil {
+		return fmt.Errorf("sending approval request: %w", err)
+	}
+	return nil
+}

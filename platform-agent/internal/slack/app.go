@@ -91,6 +91,16 @@ func NewApp(botToken, appToken string, allowedChannels []string, logger zerolog.
 	}, nil
 }
 
+// AuthTest calls Slack's auth.test to get bot identity info.
+func (a *App) AuthTest() (*slack.AuthTestResponse, error) {
+	return a.api.AuthTest()
+}
+
+// PostMessage posts a message to a Slack channel (via SafeSlackClient).
+func (a *App) PostMessage(channelID string, options ...slack.MsgOption) (string, string, error) {
+	return a.api.PostMessage(channelID, options...)
+}
+
 // Run starts the Socket Mode event loop. Blocks until context is cancelled.
 func (a *App) Run(ctx context.Context) error {
 	a.logger.Info().Msg("starting Slack Socket Mode connection")

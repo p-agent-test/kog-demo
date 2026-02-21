@@ -40,6 +40,11 @@ type Config struct {
 	TokenTTL          time.Duration `envconfig:"TOKEN_TTL" default:"10m"`
 	ApprovalTimeout   time.Duration `envconfig:"APPROVAL_TIMEOUT" default:"30m"`
 
+	// Bridge (Slack → Kog-2 via OpenClaw)
+	OpenClawBin      string `envconfig:"OPENCLAW_BIN" default:"openclaw"`
+	OpenClawURL      string `envconfig:"OPENCLAW_GATEWAY_URL"`  // ws://127.0.0.1:18789
+	OpenClawToken    string `envconfig:"OPENCLAW_GATEWAY_TOKEN"`
+
 	// Management API
 	MgmtListenAddr   string        `envconfig:"MGMT_LISTEN_ADDR" default:":8090"`
 	MgmtAuthMode     string        `envconfig:"MGMT_AUTH_MODE" default:"api-key"`

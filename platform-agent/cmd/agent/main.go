@@ -14,6 +14,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/p-blackswan/platform-agent/internal/agent"
+	"github.com/p-blackswan/platform-agent/internal/bridge"
 	"github.com/p-blackswan/platform-agent/internal/config"
 	ghclient "github.com/p-blackswan/platform-agent/internal/github"
 	"github.com/p-blackswan/platform-agent/internal/health"
@@ -219,9 +220,25 @@ func main() {
 		if slackErr != nil {
 			logger.Error().Err(slackErr).Msg("failed to init Slack app (non-fatal)")
 		} else {
-			// Set Slack API on the agent for notifications
-			// Note: slackApp.api implements agent.SlackAPI via slack.Client
-			logger.Info().Msg("Slack Socket Mode enabled (interactive callbacks only)")
+			// Get bot user ID for self-message filtering
+			botUserID := ""
+			if authResp, authErr := slackApp.AuthTest(); authErr == nil {
+				botUserID = authResp.UserID
+				logger.Info().Str("bot_user_id", botUserID).Msg("Slack bot identity resolved")
+			}
+
+			// Initialize bridge (Slack → Kog-2 via openclaw CLI)
+			slackBridge := bridge.New(bridge.Config{
+				OpenClawBin:    cfg.OpenClawBin,
+				GatewayURL:     cfg.OpenClawURL,
+				GatewayToken:   cfg.OpenClawToken,
+				BotUserID:      botUserID,
+				MaxConcurrent:  5,
+			}, bridge.NewSlackPoster(slackApp), logger)
+
+			slackHandler.SetForwarder(slackBridge)
+
+			logger.Info().Msg("Slack Socket Mode enabled (bridge + interactive callbacks)")
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
