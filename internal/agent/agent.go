@@ -18,6 +18,7 @@ import (
 	ghclient "github.com/p-blackswan/platform-agent/internal/github"
 	jiraclient "github.com/p-blackswan/platform-agent/internal/jira"
 	"github.com/p-blackswan/platform-agent/internal/metrics"
+	"github.com/p-blackswan/platform-agent/internal/mgmt"
 	"github.com/p-blackswan/platform-agent/internal/models"
 	"github.com/p-blackswan/platform-agent/internal/supervisor"
 )
@@ -209,6 +210,44 @@ func (a *Agent) registerPendingApproval(requestID string, info *pendingApprovalI
 	a.pendingMu.Lock()
 	a.pendingApprovals[requestID] = info
 	a.pendingMu.Unlock()
+}
+
+// NotifyTaskCompletion posts task results to a Slack channel/thread.
+// Implements mgmt.TaskCompletionNotifier.
+func (a *Agent) NotifyTaskCompletion(channel, threadTS, taskID, taskType string, status mgmt.TaskStatus, result json.RawMessage, taskErr string) {
+	if a.slack == nil || channel == "" {
+		return
+	}
+
+	var msg string
+	switch status {
+	case mgmt.TaskCompleted:
+		// Summarize result
+		summary := string(result)
+		if len(summary) > 500 {
+			summary = summary[:500] + "…"
+		}
+		msg = fmt.Sprintf("✅ *Task completed*\n*Type:* `%s`\n*Result:* ```%s```", taskType, summary)
+	case mgmt.TaskFailed:
+		msg = fmt.Sprintf("❌ *Task failed*\n*Type:* `%s`\n*Error:* %s", taskType, taskErr)
+	default:
+		return
+	}
+
+	var opts []slack.MsgOption
+	opts = append(opts, slack.MsgOptionText(msg, false))
+	if threadTS != "" {
+		opts = append(opts, slack.MsgOptionTS(threadTS))
+	}
+
+	_, _, _ = a.slack.PostMessage(channel, opts...)
+
+	a.logger.Info().
+		Str("task_id", taskID).
+		Str("channel", channel).
+		Str("thread", threadTS).
+		Str("status", string(status)).
+		Msg("task completion notified to Slack")
 }
 
 // Execute implements mgmt.TaskExecutor. It is the main entry point called by TaskEngine.

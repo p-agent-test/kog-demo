@@ -23,19 +23,21 @@ const (
 
 // Task represents an async unit of work submitted to the agent.
 type Task struct {
-	mu          sync.RWMutex    `json:"-"`
-	ID          string          `json:"id"`
-	Type        string          `json:"type"`
-	Status      TaskStatus      `json:"status"`
-	Params      json.RawMessage `json:"params"`
-	Result      json.RawMessage `json:"result,omitempty"`
-	Error       string          `json:"error,omitempty"`
-	CallerID    string          `json:"caller_id"`
-	CallbackURL string          `json:"callback_url,omitempty"`
-	CreatedAt   time.Time       `json:"created_at"`
-	StartedAt   *time.Time      `json:"started_at,omitempty"`
-	CompletedAt *time.Time      `json:"completed_at,omitempty"`
-	TTL         time.Duration   `json:"-"`
+	mu              sync.RWMutex    `json:"-"`
+	ID              string          `json:"id"`
+	Type            string          `json:"type"`
+	Status          TaskStatus      `json:"status"`
+	Params          json.RawMessage `json:"params"`
+	Result          json.RawMessage `json:"result,omitempty"`
+	Error           string          `json:"error,omitempty"`
+	CallerID        string          `json:"caller_id"`
+	CallbackURL     string          `json:"callback_url,omitempty"`
+	ResponseChannel string          `json:"response_channel,omitempty"`
+	ResponseThread  string          `json:"response_thread,omitempty"`
+	CreatedAt       time.Time       `json:"created_at"`
+	StartedAt       *time.Time      `json:"started_at,omitempty"`
+	CompletedAt     *time.Time      `json:"completed_at,omitempty"`
+	TTL             time.Duration   `json:"-"`
 }
 
 // Lock locks the task for writing.
@@ -52,18 +54,20 @@ func (t *Task) Snapshot() Task {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return Task{
-		ID:          t.ID,
-		Type:        t.Type,
-		Status:      t.Status,
-		Params:      t.Params,
-		Result:      t.Result,
-		Error:       t.Error,
-		CallerID:    t.CallerID,
-		CallbackURL: t.CallbackURL,
-		CreatedAt:   t.CreatedAt,
-		StartedAt:   t.StartedAt,
-		CompletedAt: t.CompletedAt,
-		TTL:         t.TTL,
+		ID:              t.ID,
+		Type:            t.Type,
+		Status:          t.Status,
+		Params:          t.Params,
+		Result:          t.Result,
+		Error:           t.Error,
+		CallerID:        t.CallerID,
+		CallbackURL:     t.CallbackURL,
+		ResponseChannel: t.ResponseChannel,
+		ResponseThread:  t.ResponseThread,
+		CreatedAt:       t.CreatedAt,
+		StartedAt:       t.StartedAt,
+		CompletedAt:     t.CompletedAt,
+		TTL:             t.TTL,
 	}
 }
 
@@ -71,11 +75,13 @@ func (t *Task) Snapshot() Task {
 
 // SubmitTaskRequest is the payload for POST /api/v1/tasks.
 type SubmitTaskRequest struct {
-	Type        string          `json:"type"`
-	Params      json.RawMessage `json:"params"`
-	CallerID    string          `json:"caller_id,omitempty"`
-	CallbackURL string          `json:"callback_url,omitempty"`
-	TTLSeconds  int             `json:"ttl_seconds,omitempty"`
+	Type            string          `json:"type"`
+	Params          json.RawMessage `json:"params"`
+	CallerID        string          `json:"caller_id,omitempty"`
+	CallbackURL     string          `json:"callback_url,omitempty"`
+	ResponseChannel string          `json:"response_channel,omitempty"`
+	ResponseThread  string          `json:"response_thread,omitempty"`
+	TTLSeconds      int             `json:"ttl_seconds,omitempty"`
 }
 
 // ChatRequest is the payload for POST /api/v1/chat.

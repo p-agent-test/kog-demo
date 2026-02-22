@@ -168,6 +168,8 @@ func main() {
 
 	// Wire task engine as requeuer so agent can re-queue tasks after approval
 	agentInstance.SetRequeuer(taskEngine)
+	// Wire agent as completion notifier so task results post to Slack
+	taskEngine.SetNotifier(agentInstance)
 
 	rtCfg := &mgmt.RuntimeConfig{
 		Environment:    cfg.Environment,

@@ -32,6 +32,12 @@ type TaskExecutor interface {
 	Execute(ctx context.Context, taskType string, params json.RawMessage) (json.RawMessage, error)
 }
 
+// TaskCompletionNotifier is called after a task completes (success or failure)
+// when the task has a ResponseChannel set. Used to post results back to Slack.
+type TaskCompletionNotifier interface {
+	NotifyTaskCompletion(channel, threadTS, taskID, taskType string, status TaskStatus, result json.RawMessage, taskErr string)
+}
+
 // TaskEngine manages the lifecycle of async tasks.
 type TaskEngine struct {
 	tasks     sync.Map // id → *Task
@@ -41,11 +47,17 @@ type TaskEngine struct {
 	workers   int
 	executor  TaskExecutor
 	callbacks *CallbackDelivery
+	notifier  TaskCompletionNotifier
 	logger    zerolog.Logger
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
 	running   atomic.Bool
 	taskMu    sync.Mutex // protects individual task field mutations
+}
+
+// SetNotifier sets the completion notifier (for posting results to Slack).
+func (te *TaskEngine) SetNotifier(n TaskCompletionNotifier) {
+	te.notifier = n
 }
 
 // TaskEngineConfig holds configuration for the task engine.
@@ -107,13 +119,15 @@ func (te *TaskEngine) Submit(req SubmitTaskRequest) (*Task, error) {
 	}
 
 	task := &Task{
-		ID:          uuid.New().String(),
-		Type:        req.Type,
-		Status:      TaskPending,
-		Params:      req.Params,
-		CallerID:    req.CallerID,
-		CallbackURL: req.CallbackURL,
-		CreatedAt:   time.Now().UTC(),
+		ID:              uuid.New().String(),
+		Type:            req.Type,
+		Status:          TaskPending,
+		Params:          req.Params,
+		CallerID:        req.CallerID,
+		CallbackURL:     req.CallbackURL,
+		ResponseChannel: req.ResponseChannel,
+		ResponseThread:  req.ResponseThread,
+		CreatedAt:       time.Now().UTC(),
 	}
 
 	if req.TTLSeconds > 0 {
@@ -412,12 +426,19 @@ func (te *TaskEngine) executeTask(ctx context.Context, task *Task, log zerolog.L
 			Msg("task completed")
 	}
 
-	// Deliver callback
+	// Read final state for notifications
 	task.RLock()
 	callbackURL := task.CallbackURL
 	taskID := task.ID
+	taskType := task.Type
+	taskStatus := task.Status
+	taskResult := task.Result
+	taskError := task.Error
+	respChannel := task.ResponseChannel
+	respThread := task.ResponseThread
 	task.RUnlock()
 
+	// Deliver callback
 	if te.callbacks != nil && callbackURL != "" {
 		snap := task.Snapshot()
 		go func() {
@@ -430,5 +451,10 @@ func (te *TaskEngine) executeTask(ctx context.Context, task *Task, log zerolog.L
 					Msg("callback delivery failed")
 			}
 		}()
+	}
+
+	// Notify response channel (Slack thread) if set and task is terminal
+	if te.notifier != nil && respChannel != "" && (taskStatus == TaskCompleted || taskStatus == TaskFailed) {
+		go te.notifier.NotifyTaskCompletion(respChannel, respThread, taskID, taskType, taskStatus, taskResult, taskError)
 	}
 }
