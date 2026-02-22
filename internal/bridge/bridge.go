@@ -186,7 +186,7 @@ func (b *Bridge) HandleMessage(ctx context.Context, channelID, userID, text, thr
 		// Build session ID from channel
 		sessionID := fmt.Sprintf("%s-%s", b.cfg.SessionPrefix, channelID)
 
-		resp, err := b.callAgent(ctx, sessionID, text)
+		resp, err := b.callAgent(ctx, sessionID, userID, text)
 
 		// Remove thinking indicator
 		if messageTS != "" {
@@ -201,39 +201,45 @@ func (b *Bridge) HandleMessage(ctx context.Context, channelID, userID, text, thr
 			return
 		}
 
-		// Post response payloads (reply in thread if original was in thread)
+		// Always reply in thread:
+		// - If already in a thread, use that threadTS
+		// - If top-level message, use the message's own TS to create a new thread
+		replyThread := threadTS
+		if replyThread == "" {
+			replyThread = messageTS
+		}
+
 		for _, payload := range resp.Result.Payloads {
 			if payload.Text == "" {
 				continue
 			}
-			ts, err := b.poster.PostMessage(channelID, payload.Text, threadTS)
+			_, err := b.poster.PostMessage(channelID, payload.Text, replyThread)
 			if err != nil {
 				b.logger.Error().Err(err).
 					Str("channel", channelID).
 					Msg("failed to post response to Slack")
 				continue
 			}
+		}
 
-			// Track threads:
-			// - If already in a thread, track threadTS
-			// - If top-level reply, track the response TS (people can thread on it)
-			if threadTS != "" {
-				b.trackThread(channelID, threadTS)
-			} else if ts != "" {
-				b.trackThread(channelID, ts)
-			}
+		// Track thread for follow-up replies
+		if replyThread != "" {
+			b.trackThread(channelID, replyThread)
 		}
 	}()
 }
 
 // callAgent invokes `openclaw agent` CLI and returns the parsed response.
-func (b *Bridge) callAgent(ctx context.Context, sessionID, message string) (*AgentResponse, error) {
+func (b *Bridge) callAgent(ctx context.Context, sessionID, userID, message string) (*AgentResponse, error) {
 	ctx, cancel := context.WithTimeout(ctx, b.cfg.DefaultTimeout+10*time.Second)
 	defer cancel()
 
+	// Prepend Slack context so Kog-2 knows the platform
+	contextMessage := fmt.Sprintf("[platform:slack user:<@%s>] %s", userID, message)
+
 	args := []string{
 		"agent",
-		"--message", message,
+		"--message", contextMessage,
 		"--session-id", sessionID,
 		"--json",
 		"--timeout", fmt.Sprintf("%d", int(b.cfg.DefaultTimeout.Seconds())),
