@@ -14,6 +14,7 @@ import (
 // MessageForwarder receives inbound Slack messages and forwards them to Kog-2.
 type MessageForwarder interface {
 	HandleMessage(ctx context.Context, channelID, userID, text, threadTS string)
+	IsActiveThread(channelID, threadTS string) bool
 }
 
 // Handler processes Slack events.
@@ -90,7 +91,12 @@ func (h *Handler) handleCallbackEvent(ctx context.Context, innerEvent slackevent
 		}
 
 	case *slackevents.MessageEvent:
-		// Only handle DMs (im) — channel messages require @mention (AppMentionEvent)
+		// Skip bot messages and message_changed/deleted subtypes
+		if ev.User == "" || ev.SubType != "" {
+			return
+		}
+
+		// Handle DMs
 		if ev.ChannelType == "im" {
 			h.logger.Info().
 				Str("user", ev.User).
@@ -100,6 +106,18 @@ func (h *Handler) handleCallbackEvent(ctx context.Context, innerEvent slackevent
 			if h.forwarder != nil {
 				h.forwarder.HandleMessage(ctx, ev.Channel, ev.User, ev.Text, ev.ThreadTimeStamp)
 			}
+			return
+		}
+
+		// Handle thread replies in active threads (no @mention needed)
+		if ev.ThreadTimeStamp != "" && h.forwarder != nil && h.forwarder.IsActiveThread(ev.Channel, ev.ThreadTimeStamp) {
+			h.logger.Info().
+				Str("user", ev.User).
+				Str("channel", ev.Channel).
+				Str("thread", ev.ThreadTimeStamp).
+				Msg("thread reply in active thread")
+
+			h.forwarder.HandleMessage(ctx, ev.Channel, ev.User, ev.Text, ev.ThreadTimeStamp)
 		}
 
 	default:

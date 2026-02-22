@@ -61,11 +61,12 @@ func DefaultConfig() Config {
 
 // Bridge forwards Slack messages to Kog-2 and relays responses.
 type Bridge struct {
-	cfg    Config
-	poster SlackPoster
-	sem    chan struct{}
-	logger zerolog.Logger
-	mu     sync.Mutex
+	cfg           Config
+	poster        SlackPoster
+	sem           chan struct{}
+	logger        zerolog.Logger
+	mu            sync.Mutex
+	activeThreads map[string]bool // channel:threadTS → tracked
 }
 
 // New creates a new Bridge.
@@ -84,10 +85,11 @@ func New(cfg Config, poster SlackPoster, logger zerolog.Logger) *Bridge {
 	}
 
 	return &Bridge{
-		cfg:    cfg,
-		poster: poster,
-		sem:    make(chan struct{}, cfg.MaxConcurrent),
-		logger: logger.With().Str("component", "bridge").Logger(),
+		cfg:           cfg,
+		poster:        poster,
+		sem:           make(chan struct{}, cfg.MaxConcurrent),
+		logger:        logger.With().Str("component", "bridge").Logger(),
+		activeThreads: make(map[string]bool),
 	}
 }
 
@@ -107,6 +109,25 @@ type AgentResponse struct {
 		Code    string `json:"code"`
 		Message string `json:"message"`
 	} `json:"error"`
+}
+
+// IsActiveThread returns true if the given thread is being tracked (Kog has responded in it).
+func (b *Bridge) IsActiveThread(channelID, threadTS string) bool {
+	if threadTS == "" {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.activeThreads[channelID+":"+threadTS]
+}
+
+func (b *Bridge) trackThread(channelID, threadTS string) {
+	if threadTS == "" {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.activeThreads[channelID+":"+threadTS] = true
 }
 
 // HandleMessage processes an inbound Slack message and routes it to Kog-2.
@@ -171,10 +192,21 @@ func (b *Bridge) HandleMessage(ctx context.Context, channelID, userID, text, thr
 			if payload.Text == "" {
 				continue
 			}
-			if _, err := b.poster.PostMessage(channelID, payload.Text, threadTS); err != nil {
+			ts, err := b.poster.PostMessage(channelID, payload.Text, threadTS)
+			if err != nil {
 				b.logger.Error().Err(err).
 					Str("channel", channelID).
 					Msg("failed to post response to Slack")
+				continue
+			}
+
+			// Track threads:
+			// - If already in a thread, track threadTS
+			// - If top-level reply, track the response TS (people can thread on it)
+			if threadTS != "" {
+				b.trackThread(channelID, threadTS)
+			} else if ts != "" {
+				b.trackThread(channelID, ts)
 			}
 		}
 	}()
