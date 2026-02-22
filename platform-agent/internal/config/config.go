@@ -16,10 +16,11 @@ type Config struct {
 	HTTPPort    int    `envconfig:"HTTP_PORT" default:"8080"`
 
 	// Slack (optional — agent starts without Slack in mgmt-only mode)
-	SlackBotToken         string `envconfig:"SLACK_BOT_TOKEN"`
-	SlackAppToken         string `envconfig:"SLACK_APP_TOKEN"` // xapp- token for Socket Mode
-	SlackSigningSecret    string `envconfig:"SLACK_SIGNING_SECRET"`
-	SlackAllowedChannels  string `envconfig:"SLACK_ALLOWED_CHANNELS"` // Comma-separated channel IDs the bot can write to (fail-closed if empty)
+	// Prefixed with AGENT_ to prevent OpenClaw from auto-detecting and subscribing
+	SlackBotToken         string `envconfig:"AGENT_SLACK_BOT_TOKEN"`
+	SlackAppToken         string `envconfig:"AGENT_SLACK_APP_TOKEN"` // xapp- token for Socket Mode
+	SlackSigningSecret    string `envconfig:"AGENT_SLACK_SIGNING_SECRET"`
+	SlackAllowedChannels  string `envconfig:"AGENT_SLACK_ALLOWED_CHANNELS"` // Comma-separated channel IDs the bot can write to (fail-closed if empty)
 
 	// GitHub App (optional — agent starts without GitHub in mgmt-only mode)
 	GitHubAppID          int64  `envconfig:"GITHUB_APP_ID"`
