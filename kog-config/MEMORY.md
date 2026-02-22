@@ -7,6 +7,13 @@
 - GoPanel ekibi titiz — lint, architecture checks, depguard strict
 - Türkçe iletişim, teknik tartışmalar bazen İngilizce
 
+## Key People (Slack IDs)
+- **Anıl Küçükrecep** (<@U012YC9G6UW>) — Head of Platform Engineering, benim yaratıcım
+- **Soykan Gülcan** (<@U095ZGEAZST>) — Teknoloji Direktörü
+- **Selçuk Usta** (<@U09JKC8FPFC>) — Head of Engineering, Exchange
+- **Mehmet Kafadar** (<@U013UV0E49W>) — AI Enablement Direktörü
+- **Yasin Oral** (<@UDK62R5QW>) — CEO
+
 ## Architecture Overview
 - Go microservices, gRPC inter-service
 - Kafka (Redpanda) event streaming
