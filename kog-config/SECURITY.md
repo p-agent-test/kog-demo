@@ -22,6 +22,7 @@ External (Kog/OpenClaw)              Agent Runtime (Trusted)
 |--------|----------|----------|-------------|
 | Slack Bot Token | Vault/K8s Secret | Manual | Direct (env) |
 | Slack App Token | Vault/K8s Secret | Manual | Direct (env) |
+| Slack Allowed Channels | Vault/K8s Secret | Manual | Direct (env) |
 | GitHub App PEM | Vault/K8s Secret | Annual | Direct (file mount) |
 | K8s Kubeconfig | In-cluster SA | Auto | ServiceAccount |
 | Jira OAuth Token | Vault/K8s Secret | Auto-refresh | Direct (env) |
@@ -63,8 +64,13 @@ External (Kog/OpenClaw)              Agent Runtime (Trusted)
 
 ### Threat 5: Slack Channel Manipulation
 - **Risk:** Unauthorized user joins agent channel and issues commands
-- **Mitigation:** Channel allowlist, user-level supervisor policies
+- **Mitigation:** Channel allowlist (`SLACK_ALLOWED_CHANNELS` env — fail-closed), user-level supervisor policies
 - **Detection:** Audit log shows unknown user IDs
+
+### Threat 6: User Enumeration
+- **Risk:** Slack API could allow listing workspace users
+- **Mitigation:** `users:read` scope removed entirely. Bot has no user lookup capability — uses Slack mention format (`<@U123>`) instead. No user data is ever fetched or stored.
+- **Detection:** N/A — scope not granted, API not available
 
 ## Network Policy
 

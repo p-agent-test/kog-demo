@@ -12,8 +12,8 @@ import (
 func setRequiredEnvs(t *testing.T) {
 	t.Helper()
 	envs := map[string]string{
-		"SLACK_BOT_TOKEN":        "xoxb-test",
-		"SLACK_APP_TOKEN":        "xapp-test",
+		"AGENT_SLACK_BOT_TOKEN":  "xoxb-test",
+		"AGENT_SLACK_APP_TOKEN":  "xapp-test",
 		"GITHUB_APP_ID":          "12345",
 		"GITHUB_INSTALLATION_ID": "67890",
 		"GITHUB_PRIVATE_KEY_PATH": "/tmp/test.pem",

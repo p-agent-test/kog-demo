@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/kelseyhightower/envconfig"
@@ -15,9 +16,11 @@ type Config struct {
 	HTTPPort    int    `envconfig:"HTTP_PORT" default:"8080"`
 
 	// Slack (optional — agent starts without Slack in mgmt-only mode)
-	SlackBotToken      string `envconfig:"SLACK_BOT_TOKEN"`
-	SlackAppToken      string `envconfig:"SLACK_APP_TOKEN"` // xapp- token for Socket Mode
-	SlackSigningSecret string `envconfig:"SLACK_SIGNING_SECRET"`
+	// Prefixed with AGENT_ to prevent OpenClaw from auto-detecting and subscribing
+	SlackBotToken         string `envconfig:"AGENT_SLACK_BOT_TOKEN"`
+	SlackAppToken         string `envconfig:"AGENT_SLACK_APP_TOKEN"` // xapp- token for Socket Mode
+	SlackSigningSecret    string `envconfig:"AGENT_SLACK_SIGNING_SECRET"`
+	SlackAllowedChannels  string `envconfig:"AGENT_SLACK_ALLOWED_CHANNELS"` // Comma-separated channel IDs the bot can write to (fail-closed if empty)
 
 	// GitHub App (optional — agent starts without GitHub in mgmt-only mode)
 	GitHubAppID          int64  `envconfig:"GITHUB_APP_ID"`
@@ -38,6 +41,11 @@ type Config struct {
 	TokenTTL          time.Duration `envconfig:"TOKEN_TTL" default:"10m"`
 	ApprovalTimeout   time.Duration `envconfig:"APPROVAL_TIMEOUT" default:"30m"`
 
+	// Bridge (Slack → Kog-2 via OpenClaw)
+	OpenClawBin      string `envconfig:"OPENCLAW_BIN" default:"openclaw"`
+	OpenClawURL      string `envconfig:"OPENCLAW_GATEWAY_URL"`  // ws://127.0.0.1:18789
+	OpenClawToken    string `envconfig:"OPENCLAW_GATEWAY_TOKEN"`
+
 	// Management API
 	MgmtListenAddr   string        `envconfig:"MGMT_LISTEN_ADDR" default:":8090"`
 	MgmtAuthMode     string        `envconfig:"MGMT_AUTH_MODE" default:"api-key"`
@@ -56,6 +64,23 @@ type Config struct {
 // SlackEnabled returns true if Slack tokens are configured.
 func (c *Config) SlackEnabled() bool {
 	return c.SlackBotToken != "" && c.SlackAppToken != ""
+}
+
+// SlackAllowedChannelList returns the parsed list of allowed Slack channel IDs.
+// Returns nil if not configured (fail-closed — no channels allowed).
+func (c *Config) SlackAllowedChannelList() []string {
+	if c.SlackAllowedChannels == "" {
+		return nil
+	}
+	parts := strings.Split(c.SlackAllowedChannels, ",")
+	channels := make([]string, 0, len(parts))
+	for _, ch := range parts {
+		ch = strings.TrimSpace(ch)
+		if ch != "" {
+			channels = append(channels, ch)
+		}
+	}
+	return channels
 }
 
 // GitHubEnabled returns true if GitHub App credentials are configured.

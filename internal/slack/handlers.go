@@ -7,17 +7,24 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/slack-go/slack"
+	"github.com/slack-go/slack/slackevents"
 	"github.com/slack-go/slack/socketmode"
 )
 
+// MessageForwarder receives inbound Slack messages and forwards them to Kog-2.
+type MessageForwarder interface {
+	HandleMessage(ctx context.Context, channelID, userID, text, threadTS string)
+}
+
 // Handler processes Slack events.
-// In the new architecture, the handler only processes interactive callbacks
-// (button clicks for approvals). Message interpretation is handled by Kog-2
-// via the Management API.
+// Interactive callbacks (approval buttons) are handled inline.
+// Regular messages are forwarded to Kog-2 via the MessageForwarder (bridge).
 type Handler struct {
 	api        BotAPI
+	socket     *socketmode.Client
 	logger     zerolog.Logger
 	middleware *Middleware
+	forwarder  MessageForwarder
 }
 
 // NewHandler creates a new event handler.
@@ -28,18 +35,86 @@ func NewHandler(logger zerolog.Logger, middleware *Middleware) *Handler {
 	}
 }
 
+// SetForwarder sets the message forwarder (bridge) for routing messages to Kog-2.
+func (h *Handler) SetForwarder(f MessageForwarder) {
+	h.forwarder = f
+}
+
+// SetSocket sets the Socket Mode client for acknowledging events.
+func (h *Handler) SetSocket(s *socketmode.Client) {
+	h.socket = s
+}
+
 // HandleEvent routes Socket Mode events to the appropriate handler.
-// Only interactive callbacks (button clicks) are processed.
 func (h *Handler) HandleEvent(ctx context.Context, evt socketmode.Event) {
 	switch evt.Type {
+	case socketmode.EventTypeEventsAPI:
+		h.handleEventsAPI(ctx, evt)
 	case socketmode.EventTypeInteractive:
 		h.handleInteraction(ctx, evt)
 	default:
-		h.logger.Debug().Str("type", string(evt.Type)).Msg("unhandled event type (messages handled by Kog-2)")
+		h.logger.Debug().Str("type", string(evt.Type)).Msg("unhandled event type")
+	}
+}
+
+// handleEventsAPI processes Events API payloads (messages, app_mention, etc.).
+func (h *Handler) handleEventsAPI(ctx context.Context, evt socketmode.Event) {
+	// Acknowledge the event first — Slack requires this within 3 seconds
+	if h.socket != nil && evt.Request != nil {
+		h.socket.Ack(*evt.Request)
+	}
+
+	eventsAPIEvent, ok := evt.Data.(slackevents.EventsAPIEvent)
+	if !ok {
+		h.logger.Warn().Str("type", string(evt.Type)).Msg("failed to cast events_api data")
+		return
+	}
+
+	switch eventsAPIEvent.Type {
+	case slackevents.CallbackEvent:
+		h.handleCallbackEvent(ctx, eventsAPIEvent.InnerEvent)
+	}
+}
+
+func (h *Handler) handleCallbackEvent(ctx context.Context, innerEvent slackevents.EventsAPIInnerEvent) {
+	switch ev := innerEvent.Data.(type) {
+	case *slackevents.AppMentionEvent:
+		h.logger.Info().
+			Str("user", ev.User).
+			Str("channel", ev.Channel).
+			Str("text", ev.Text).
+			Msg("app mention received")
+
+		if h.forwarder != nil {
+			h.forwarder.HandleMessage(ctx, ev.Channel, ev.User, ev.Text, ev.ThreadTimeStamp)
+		}
+
+	case *slackevents.MessageEvent:
+		// Only handle DMs (im) — channel messages require @mention (AppMentionEvent)
+		if ev.ChannelType == "im" {
+			h.logger.Info().
+				Str("user", ev.User).
+				Str("channel", ev.Channel).
+				Msg("DM received")
+
+			if h.forwarder != nil {
+				h.forwarder.HandleMessage(ctx, ev.Channel, ev.User, ev.Text, ev.ThreadTimeStamp)
+			}
+		}
+
+	default:
+		h.logger.Debug().
+			Str("inner_type", innerEvent.Type).
+			Msg("unhandled callback event type")
 	}
 }
 
 func (h *Handler) handleInteraction(ctx context.Context, evt socketmode.Event) {
+	// Acknowledge interactive event
+	if h.socket != nil && evt.Request != nil {
+		h.socket.Ack(*evt.Request)
+	}
+
 	callback, ok := evt.Data.(slack.InteractionCallback)
 	if !ok {
 		return

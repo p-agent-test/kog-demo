@@ -108,3 +108,33 @@ func TestNewHandler(t *testing.T) {
 	assert.NotNil(t, h)
 	assert.NotNil(t, h.middleware)
 }
+
+func TestSafeSlackClient_ChannelAllowlist(t *testing.T) {
+	logger := zerolog.Nop()
+
+	t.Run("allowed channel", func(t *testing.T) {
+		mock := &mockSlackAPI{}
+		mw := NewMiddleware(logger, 10, time.Minute)
+		h := NewHandler(logger, mw)
+		h.api = mock
+
+		err := h.SendApprovalRequest(context.Background(), "C_ALLOWED", "req-1", "U1", "deploy", "api")
+		require.NoError(t, err)
+	})
+
+	t.Run("blocked channel", func(t *testing.T) {
+		client := NewSafeSlackClient(nil, []string{"C_ALLOWED"}, logger)
+
+		_, _, err := client.PostMessage("C_NOT_ALLOWED")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not in the allowed channels list")
+	})
+
+	t.Run("empty allowlist denies all", func(t *testing.T) {
+		client := NewSafeSlackClient(nil, []string{}, logger)
+
+		_, _, err := client.PostMessage("C_ANY")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not in the allowed channels list")
+	})
+}

@@ -1,8 +1,7 @@
 # USER.md — Team Context
 
 ## Primary Contact
-- **Name:** Anıl Küçükrecep
-- **Role:** Head of Platform Engineering @ Paribu
+- **Name:** Anıl
 - **Timezone:** Europe/Istanbul (UTC+3)
 - **Preferences:** Kısa mesajlar, bullet points, mobilden çalışıyor
 
