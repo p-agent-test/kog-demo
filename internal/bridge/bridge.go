@@ -186,7 +186,13 @@ func (b *Bridge) HandleMessage(ctx context.Context, channelID, userID, text, thr
 		// Build session ID from channel
 		sessionID := fmt.Sprintf("%s-%s", b.cfg.SessionPrefix, channelID)
 
-		resp, err := b.callAgent(ctx, sessionID, userID, text)
+		// Determine the thread TS for context injection
+		ctxThread := threadTS
+		if ctxThread == "" {
+			ctxThread = messageTS
+		}
+
+		resp, err := b.callAgent(ctx, sessionID, channelID, ctxThread, userID, text)
 
 		// Remove thinking indicator
 		if messageTS != "" {
@@ -230,12 +236,12 @@ func (b *Bridge) HandleMessage(ctx context.Context, channelID, userID, text, thr
 }
 
 // callAgent invokes `openclaw agent` CLI and returns the parsed response.
-func (b *Bridge) callAgent(ctx context.Context, sessionID, userID, message string) (*AgentResponse, error) {
+func (b *Bridge) callAgent(ctx context.Context, sessionID, channelID, threadTS, userID, message string) (*AgentResponse, error) {
 	ctx, cancel := context.WithTimeout(ctx, b.cfg.DefaultTimeout+10*time.Second)
 	defer cancel()
 
-	// Prepend Slack context so Kog-2 knows the platform
-	contextMessage := fmt.Sprintf("[platform:slack user:<@%s>] %s", userID, message)
+	// Prepend Slack context so Kog-2 knows the platform and can route async responses
+	contextMessage := fmt.Sprintf("[slack_context: channel=%s thread=%s user=<@%s>]\n%s", channelID, threadTS, userID, message)
 
 	args := []string{
 		"agent",

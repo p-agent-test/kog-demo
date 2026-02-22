@@ -208,7 +208,7 @@ func (a *Agent) OnApproval(requestID, approverID string, approved bool) {
 // formatCompletionMessage creates a human-friendly Slack message from task results.
 // Extracts URLs, titles, numbers etc. from known result shapes.
 func (a *Agent) formatCompletionMessage(taskType string, result json.RawMessage) string {
-	// Try to extract common fields from github.exec results
+	// Try to extract common fields
 	var data map[string]interface{}
 	if err := json.Unmarshal(result, &data); err == nil {
 		// Check for nested "data" from GHExecResult wrapper
@@ -216,12 +216,12 @@ func (a *Agent) formatCompletionMessage(taskType string, result json.RawMessage)
 			data = inner
 		}
 
-		url, _ := data["url"].(string)
-		title, _ := data["title"].(string)
-		number, _ := data["number"].(float64)
-		state, _ := data["state"].(string)
+		url := extractString(data, "url", "html_url", "web_url")
+		title := extractString(data, "title", "name", "full_name")
+		number := extractFloat(data, "number", "id")
+		state := extractString(data, "state", "status")
 
-		if url != "" {
+		if url != "" || title != "" {
 			parts := []string{fmt.Sprintf("✅ *%s completed*", taskType)}
 			if title != "" {
 				if number > 0 {
@@ -233,7 +233,9 @@ func (a *Agent) formatCompletionMessage(taskType string, result json.RawMessage)
 			if state != "" {
 				parts = append(parts, fmt.Sprintf("State: `%s`", state))
 			}
-			parts = append(parts, url)
+			if url != "" {
+				parts = append(parts, url)
+			}
 			return strings.Join(parts, "\n")
 		}
 	}
@@ -244,6 +246,26 @@ func (a *Agent) formatCompletionMessage(taskType string, result json.RawMessage)
 		summary = summary[:500] + "…"
 	}
 	return fmt.Sprintf("✅ *%s completed*\n```%s```", taskType, summary)
+}
+
+// extractString returns the first non-empty string value from data for the given keys.
+func extractString(data map[string]interface{}, keys ...string) string {
+	for _, k := range keys {
+		if v, ok := data[k].(string); ok && v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// extractFloat returns the first non-zero float value from data for the given keys.
+func extractFloat(data map[string]interface{}, keys ...string) float64 {
+	for _, k := range keys {
+		if v, ok := data[k].(float64); ok && v > 0 {
+			return v
+		}
+	}
+	return 0
 }
 
 // registerPendingApproval stores task info for later approval callback.

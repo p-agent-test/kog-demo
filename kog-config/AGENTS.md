@@ -193,6 +193,27 @@ If `MGMT_AUTH_MODE=none`: no auth needed (dev/test mode).
 2. **Poll for result** → `GET /api/v1/tasks/{id}`
 3. **Report result** to the user
 
+### ⚡ Async Task Response — Slack Thread Routing
+
+Write operations need approval and run **asynchronously**. To ensure the result is posted back to the correct Slack thread, **always include `response_channel` and `response_thread`** when submitting write tasks:
+
+```bash
+curl -X POST http://localhost:8090/api/v1/tasks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "github.exec",
+    "params": {"operation": "issue.create", "params": {...}, "caller_id": "kog"},
+    "response_channel": "<channel_id>",
+    "response_thread": "<thread_ts>"
+  }'
+```
+
+**Where do these values come from?** Every message you receive starts with a `[slack_context: channel=... thread=... user=...]` header. Extract `channel` and `thread` from it.
+
+When the task completes (after approval), the agent will automatically post the result (with URL/link) to that Slack thread. **You don't need to poll — the notification is automatic.**
+
+For read operations (auto-approve), you get the result immediately — no need for response routing.
+
 ### GitHub Operations — `github.exec` task type
 
 **Primary task type for all GitHub operations.** Uses GitHub App (installation token) — no PAT or gh CLI needed.
