@@ -43,9 +43,15 @@ type Config struct {
 	ApprovalTimeout       time.Duration `envconfig:"APPROVAL_TIMEOUT" default:"30m"`
 
 	// Bridge (Slack → Kog-2 via OpenClaw)
+	BridgeMode       string `envconfig:"BRIDGE_MODE" default:"cli"` // "cli" or "ws"
 	OpenClawBin      string `envconfig:"OPENCLAW_BIN" default:"openclaw"`
-	OpenClawURL      string `envconfig:"OPENCLAW_GATEWAY_URL"`  // ws://127.0.0.1:18789
+	OpenClawURL      string `envconfig:"OPENCLAW_GATEWAY_URL"`  // ws://localhost:18789/ws/gateway (WS mode) or http://localhost:18789 (CLI mode)
 	OpenClawToken    string `envconfig:"OPENCLAW_GATEWAY_TOKEN"`
+
+	// WS Bridge (device auth — required when BRIDGE_MODE=ws)
+	WSDeviceID        string `envconfig:"WS_DEVICE_ID"`
+	WSPublicKey       string `envconfig:"WS_PUBLIC_KEY"`        // base64url, raw 32 bytes
+	WSPrivateKeyPath  string `envconfig:"WS_PRIVATE_KEY_PATH"`  // path to PEM file (Ed25519)
 
 	// Management API
 	MgmtListenAddr   string        `envconfig:"MGMT_LISTEN_ADDR" default:":8090"`
@@ -92,6 +98,11 @@ func (c *Config) GitHubEnabled() bool {
 // JiraEnabled returns true if Jira base URL is configured.
 func (c *Config) JiraEnabled() bool {
 	return c.JiraBaseURL != ""
+}
+
+// WSBridgeEnabled returns true if WS bridge mode is configured with device auth.
+func (c *Config) WSBridgeEnabled() bool {
+	return strings.EqualFold(c.BridgeMode, "ws") && c.WSDeviceID != "" && c.WSPrivateKeyPath != ""
 }
 
 // Load reads configuration from environment variables.

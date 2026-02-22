@@ -8,53 +8,38 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// WSBridge wraps WSClient and implements the same message handling as Bridge,
-// but uses a persistent WebSocket connection instead of CLI exec.
+// WSBridge wraps WSClient and implements MessageForwarder (slack.MessageForwarder).
+// Uses persistent WebSocket for OpenClaw communication instead of CLI exec.
 type WSBridge struct {
-	ws     *WSClient
-	poster SlackPoster
-	logger zerolog.Logger
-	cfg    Config
+	ws        *WSClient
+	poster    SlackPoster
+	botUserID string
+	logger    zerolog.Logger
 
-	// Reuse Bridge's thread tracking and semaphore
+	// Embed Bridge for thread tracking and IsActiveThread
 	*Bridge
 }
 
 // NewWSBridge creates a bridge that uses WebSocket for OpenClaw communication.
-// It wraps a regular Bridge for thread tracking and Slack posting, but overrides
-// the agent call to use WebSocket.
-func NewWSBridge(wsCfg WSConfig, bridgeCfg Config, poster SlackPoster, logger zerolog.Logger) *WSBridge {
-	ws := NewWSClient(wsCfg, logger)
-	base := New(bridgeCfg, poster, logger)
+func NewWSBridge(ws *WSClient, poster SlackPoster, botUserID string, logger zerolog.Logger) *WSBridge {
+	// Create a dummy CLI bridge config for thread tracking
+	base := New(Config{
+		BotUserID:     botUserID,
+		MaxConcurrent: 5,
+	}, poster, logger)
 
 	return &WSBridge{
-		ws:     ws,
-		poster: poster,
-		logger: logger.With().Str("component", "ws-bridge").Logger(),
-		cfg:    bridgeCfg,
-		Bridge: base,
+		ws:        ws,
+		poster:    poster,
+		botUserID: botUserID,
+		logger:    logger.With().Str("component", "ws-bridge").Logger(),
+		Bridge:    base,
 	}
 }
 
-// Connect establishes the WebSocket connection.
-func (b *WSBridge) Connect(ctx context.Context) error {
-	return b.ws.Connect(ctx)
-}
-
-// Close shuts down the WebSocket connection.
-func (b *WSBridge) CloseWS() error {
-	return b.ws.Close()
-}
-
-// IsConnected returns the WebSocket connection status.
-func (b *WSBridge) IsConnected() bool {
-	return b.ws.IsConnected()
-}
-
-// HandleMessage processes an inbound Slack message via WebSocket.
+// HandleMessage processes an inbound Slack message via WebSocket + chat.send.
 func (b *WSBridge) HandleMessage(ctx context.Context, channelID, userID, text, threadTS, messageTS string) {
-	// Skip bot's own messages
-	if userID == b.cfg.BotUserID {
+	if userID == b.botUserID {
 		return
 	}
 
@@ -64,8 +49,8 @@ func (b *WSBridge) HandleMessage(ctx context.Context, channelID, userID, text, t
 	}
 
 	// Strip bot mention
-	if b.cfg.BotUserID != "" {
-		mention := fmt.Sprintf("<@%s>", b.cfg.BotUserID)
+	if b.botUserID != "" {
+		mention := fmt.Sprintf("<@%s>", b.botUserID)
 		text = strings.TrimPrefix(text, mention)
 		text = strings.TrimSpace(text)
 		if text == "" {
@@ -73,14 +58,11 @@ func (b *WSBridge) HandleMessage(ctx context.Context, channelID, userID, text, t
 		}
 	}
 
-	// Acquire semaphore
+	// Acquire semaphore (from embedded Bridge)
 	select {
 	case b.sem <- struct{}{}:
 	default:
-		b.logger.Warn().
-			Str("channel", channelID).
-			Str("user", userID).
-			Msg("bridge at capacity, dropping message")
+		b.logger.Warn().Str("channel", channelID).Msg("bridge at capacity, dropping message")
 		return
 	}
 
@@ -93,44 +75,43 @@ func (b *WSBridge) HandleMessage(ctx context.Context, channelID, userID, text, t
 			Str("text", truncate(text, 100)).
 			Msg("forwarding to Kog-2 via WS")
 
-		// Show thinking indicator
+		// Hourglass indicator
 		if messageTS != "" {
 			_ = b.poster.AddReaction(channelID, messageTS, "hourglass_flowing_sand")
+			defer func() {
+				_ = b.poster.RemoveReaction(channelID, messageTS, "hourglass_flowing_sand")
+			}()
 		}
 
-		sessionID := fmt.Sprintf("%s-%s", b.cfg.SessionPrefix, channelID)
-		contextMessage := fmt.Sprintf("[platform:slack user:<@%s>] %s", userID, text)
-
-		resp, err := b.ws.SendAgent(ctx, sessionID, contextMessage)
-
-		// Remove thinking indicator
-		if messageTS != "" {
-			_ = b.poster.RemoveReaction(channelID, messageTS, "hourglass_flowing_sand")
+		// Build session key — thread-per-session when threadTS available
+		sessionKey := fmt.Sprintf("agent:main:slack-%s", channelID)
+		if threadTS != "" {
+			sessionKey = fmt.Sprintf("agent:main:slack-%s-%s", channelID, threadTS)
 		}
 
+		contextMessage := fmt.Sprintf("[platform:slack user:<@%s> channel:%s thread:%s] %s",
+			userID, channelID, threadTS, text)
+
+		// Send via WebSocket chat.send (streaming)
+		response, err := b.ws.SendChat(ctx, sessionKey, contextMessage)
 		if err != nil {
-			b.logger.Error().Err(err).Msg("ws agent call failed")
-			if _, postErr := b.poster.PostMessage(channelID, "⚠️ Kog geçici olarak yanıt veremiyor. Tekrar deneyin.", threadTS); postErr != nil {
+			b.logger.Error().Err(err).Msg("WS chat.send failed")
+			if _, postErr := b.poster.PostMessage(channelID, "⚠️ Kog geçici olarak yanıt veremiyor.", threadTS); postErr != nil {
 				b.logger.Error().Err(postErr).Msg("failed to post error message")
 			}
 			return
 		}
 
+		// Post response to Slack
 		replyThread := threadTS
 		if replyThread == "" {
 			replyThread = messageTS
 		}
 
-		for _, payload := range resp.Result.Payloads {
-			if payload.Text == "" {
-				continue
-			}
-			_, err := b.poster.PostMessage(channelID, payload.Text, replyThread)
+		if response != "" && response != "NO_REPLY" && response != "HEARTBEAT_OK" {
+			_, err := b.poster.PostMessage(channelID, response, replyThread)
 			if err != nil {
-				b.logger.Error().Err(err).
-					Str("channel", channelID).
-					Msg("failed to post response to Slack")
-				continue
+				b.logger.Error().Err(err).Str("channel", channelID).Msg("failed to post to Slack")
 			}
 		}
 

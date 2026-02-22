@@ -13,6 +13,8 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	"encoding/json"
+
 	"github.com/p-blackswan/platform-agent/internal/agent"
 	"github.com/p-blackswan/platform-agent/internal/bridge"
 	"github.com/p-blackswan/platform-agent/internal/config"
@@ -236,14 +238,55 @@ func main() {
 				logger.Info().Str("bot_user_id", botUserID).Msg("Slack bot identity resolved")
 			}
 
-			// Initialize bridge (Slack → Kog-2 via openclaw CLI)
-			slackBridge := bridge.New(bridge.Config{
-				OpenClawBin:    cfg.OpenClawBin,
-				GatewayURL:     cfg.OpenClawURL,
-				GatewayToken:   cfg.OpenClawToken,
-				BotUserID:      botUserID,
-				MaxConcurrent:  5,
-			}, bridge.NewSlackPoster(slackApp), logger)
+			// Initialize bridge (Slack → Kog-2)
+			var slackBridge slackpkg.MessageForwarder
+			if cfg.WSBridgeEnabled() {
+				// WS bridge — persistent WebSocket to gateway
+				privKeyPEM, readErr := os.ReadFile(cfg.WSPrivateKeyPath)
+				if readErr != nil {
+					logger.Fatal().Err(readErr).Str("path", cfg.WSPrivateKeyPath).Msg("failed to read WS private key")
+				}
+
+				// Auto-detect publicKey from paired.json if not explicitly set
+				pubKey := cfg.WSPublicKey
+				if pubKey == "" {
+					pubKey = autoDetectPublicKey(cfg.WSDeviceID, logger)
+				}
+
+				// Ensure gateway URL has /ws/gateway path
+				gwURL := cfg.OpenClawURL
+				if gwURL == "" {
+					gwURL = "ws://localhost:18789/ws/gateway"
+				}
+
+				wsCfg := bridge.WSConfig{
+					GatewayURL:    gwURL,
+					Token:         cfg.OpenClawToken,
+					DeviceID:      cfg.WSDeviceID,
+					PublicKey:     pubKey,
+					PrivateKeyPEM: string(privKeyPEM),
+					ClientID:      "gateway-client",
+					Scopes:        []string{"operator.admin", "operator.approvals", "operator.pairing", "operator.write", "operator.read"},
+				}
+
+				wsClient := bridge.NewWSClient(wsCfg, logger)
+				if connErr := wsClient.Connect(ctx); connErr != nil {
+					logger.Fatal().Err(connErr).Msg("WS bridge connect failed")
+				}
+
+				slackBridge = bridge.NewWSBridge(wsClient, bridge.NewSlackPoster(slackApp), botUserID, logger)
+				logger.Info().Msg("🔌 WS bridge active (persistent WebSocket)")
+			} else {
+				// CLI bridge — openclaw agent CLI
+				slackBridge = bridge.New(bridge.Config{
+					OpenClawBin:    cfg.OpenClawBin,
+					GatewayURL:     cfg.OpenClawURL,
+					GatewayToken:   cfg.OpenClawToken,
+					BotUserID:      botUserID,
+					MaxConcurrent:  5,
+				}, bridge.NewSlackPoster(slackApp), logger)
+				logger.Info().Msg("📟 CLI bridge active (openclaw agent)")
+			}
 
 			slackHandler.SetForwarder(slackBridge)
 
@@ -303,4 +346,28 @@ func main() {
 	}
 
 	logger.Info().Msg("platform agent stopped")
+}
+
+// autoDetectPublicKey reads the device's public key from OpenClaw's paired.json.
+func autoDetectPublicKey(deviceID string, logger zerolog.Logger) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(home + "/.openclaw/devices/paired.json")
+	if err != nil {
+		logger.Debug().Err(err).Msg("no paired.json found — WS_PUBLIC_KEY must be set explicitly")
+		return ""
+	}
+	var paired map[string]struct {
+		PublicKey string `json:"publicKey"`
+	}
+	if err := json.Unmarshal(data, &paired); err != nil {
+		return ""
+	}
+	if dev, ok := paired[deviceID]; ok {
+		logger.Info().Str("deviceId", deviceID[:16]+"...").Msg("auto-detected public key from paired.json")
+		return dev.PublicKey
+	}
+	return ""
 }
