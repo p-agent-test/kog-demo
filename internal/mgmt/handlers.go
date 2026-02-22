@@ -12,10 +12,11 @@ import (
 
 // Handlers holds dependencies for HTTP handlers.
 type Handlers struct {
-	engine    *TaskEngine
-	checker   *health.Checker
-	logger    zerolog.Logger
-	startTime time.Time
+	engine         *TaskEngine
+	checker        *health.Checker
+	sessionCtxStore *SessionContextStore
+	logger         zerolog.Logger
+	startTime      time.Time
 
 	// Runtime config (mutable)
 	runtimeConfig *RuntimeConfig
@@ -34,13 +35,14 @@ type RuntimeConfig struct {
 }
 
 // NewHandlers creates a new Handlers instance.
-func NewHandlers(engine *TaskEngine, checker *health.Checker, rtCfg *RuntimeConfig, logger zerolog.Logger) *Handlers {
+func NewHandlers(engine *TaskEngine, checker *health.Checker, sessionCtx *SessionContextStore, rtCfg *RuntimeConfig, logger zerolog.Logger) *Handlers {
 	return &Handlers{
-		engine:        engine,
-		checker:       checker,
-		logger:        logger.With().Str("component", "handlers").Logger(),
-		startTime:     time.Now(),
-		runtimeConfig: rtCfg,
+		engine:          engine,
+		checker:         checker,
+		sessionCtxStore: sessionCtx,
+		logger:          logger.With().Str("component", "handlers").Logger(),
+		startTime:       time.Now(),
+		runtimeConfig:   rtCfg,
 	}
 }
 
@@ -65,8 +67,22 @@ func (h *Handlers) SubmitTask(c *fiber.Ctx) error {
 			"Unknown task type: "+req.Type)
 	}
 
+	// Auto-resolve response routing from session context store.
+	// This means Kog-2 doesn't need to manually include response_channel/thread —
+	// the bridge registers the Slack context, and task submission picks it up automatically.
+	if req.ResponseChannel == "" && h.sessionCtxStore != nil {
+		if sctx := h.sessionCtxStore.Resolve(req.CallerID); sctx != nil {
+			req.ResponseChannel = sctx.Channel
+			req.ResponseThread = sctx.ThreadTS
+			h.logger.Debug().
+				Str("caller_id", req.CallerID).
+				Str("resolved_channel", sctx.Channel).
+				Str("resolved_thread", sctx.ThreadTS).
+				Msg("auto-resolved response routing from session context")
+		}
+	}
+
 	// Fallback: extract response routing from params if not set at top level
-	// (some callers may embed these inside params instead of top-level)
 	if req.ResponseChannel == "" && len(req.Params) > 0 {
 		var embedded struct {
 			ResponseChannel string `json:"response_channel"`
@@ -90,6 +106,35 @@ func (h *Handlers) SubmitTask(c *fiber.Ctx) error {
 	}
 
 	return c.Status(fiber.StatusAccepted).JSON(TaskResponse{Task: task})
+}
+
+// RegisterSessionContext handles POST /api/v1/context.
+// The bridge calls this before forwarding a Slack message to Kog-2,
+// so the agent knows where to route async task completion notifications.
+func (h *Handlers) RegisterSessionContext(c *fiber.Ctx) error {
+	var req SessionContext
+	if err := c.BodyParser(&req); err != nil {
+		return problemResponse(c, fiber.StatusBadRequest,
+			"invalid_body", "Bad Request",
+			"Invalid request body: "+err.Error())
+	}
+
+	if req.Channel == "" {
+		return problemResponse(c, fiber.StatusBadRequest,
+			"missing_channel", "Bad Request",
+			"Channel is required")
+	}
+
+	if h.sessionCtxStore != nil {
+		h.sessionCtxStore.Set(req)
+		h.logger.Info().
+			Str("session_id", req.SessionID).
+			Str("channel", req.Channel).
+			Str("thread_ts", req.ThreadTS).
+			Msg("session context registered")
+	}
+
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{"ok": true})
 }
 
 // ListTasks handles GET /api/v1/tasks.

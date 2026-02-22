@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
@@ -53,7 +54,8 @@ func NewServer(
 		WriteBufferSize:       8192,
 	})
 
-	handlers := NewHandlers(engine, checker, rtCfg, logger)
+	sessionCtxStore := NewSessionContextStore(30 * time.Minute) // 30 min TTL
+	handlers := NewHandlers(engine, checker, sessionCtxStore, rtCfg, logger)
 
 	s := &Server{
 		app:      app,
@@ -145,6 +147,9 @@ func (s *Server) setupRoutes(h *Handlers, metricsCollector *metrics.Metrics) {
 	v1.Get("/tasks", h.ListTasks)
 	v1.Get("/tasks/:id", h.GetTask)
 	v1.Delete("/tasks/:id", h.CancelTask)
+
+	// Session context (bridge registers Slack routing info)
+	v1.Post("/context", h.RegisterSessionContext)
 
 	// Chat endpoint
 	v1.Post("/chat", h.Chat)

@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os/exec"
 	"strings"
 	"sync"
@@ -35,6 +36,10 @@ type Config struct {
 	// GatewayToken is the auth token for the gateway.
 	// If empty, openclaw uses its stored device identity.
 	GatewayToken string
+
+	// MgmtURL is the Management API base URL for registering session context.
+	// Default: "http://localhost:8090"
+	MgmtURL string
 
 	// DefaultTimeout is the max wait for an agent response.
 	DefaultTimeout time.Duration
@@ -192,6 +197,9 @@ func (b *Bridge) HandleMessage(ctx context.Context, channelID, userID, text, thr
 			ctxThread = messageTS
 		}
 
+		// Register Slack context with agent so async task completions route back here
+		b.registerSessionContext(sessionID, channelID, ctxThread)
+
 		resp, err := b.callAgent(ctx, sessionID, channelID, ctxThread, userID, text)
 
 		// Remove thinking indicator
@@ -293,6 +301,39 @@ func (b *Bridge) callAgent(ctx context.Context, sessionID, channelID, threadTS, 
 		Msg("agent response received")
 
 	return &resp, nil
+}
+
+// registerSessionContext calls POST /api/v1/context on the Management API
+// to register the Slack routing context for this session.
+func (b *Bridge) registerSessionContext(sessionID, channelID, threadTS string) {
+	mgmtURL := b.cfg.MgmtURL
+	if mgmtURL == "" {
+		mgmtURL = "http://localhost:8090"
+	}
+
+	body := fmt.Sprintf(`{"session_id":"%s","channel":"%s","thread_ts":"%s"}`, sessionID, channelID, threadTS)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", mgmtURL+"/api/v1/context", strings.NewReader(body))
+	if err != nil {
+		b.logger.Warn().Err(err).Msg("failed to create context registration request")
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		b.logger.Warn().Err(err).Msg("failed to register session context")
+		return
+	}
+	resp.Body.Close()
+
+	b.logger.Debug().
+		Str("session", sessionID).
+		Str("channel", channelID).
+		Str("thread", threadTS).
+		Msg("session context registered with agent")
 }
 
 func truncate(s string, max int) string {
