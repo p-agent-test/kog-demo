@@ -29,6 +29,11 @@ func (m *mockSlackAPI) PostMessage(channelID string, options ...slack.MsgOption)
 	return channelID, "1234567890.123456", nil
 }
 
+func (m *mockSlackAPI) UpdateMessage(channelID, timestamp string, options ...slack.MsgOption) (string, string, string, error) {
+	m.postedMessages = append(m.postedMessages, postedMessage{ChannelID: channelID, Options: options})
+	return channelID, timestamp, "", nil
+}
+
 func (m *mockSlackAPI) GetConversationInfo(_ *slack.GetConversationInfoInput) (*slack.Channel, error) {
 	return &slack.Channel{}, nil
 }

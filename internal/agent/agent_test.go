@@ -33,6 +33,10 @@ func (m *mockSlack) PostMessage(channelID string, options ...slack.MsgOption) (s
 	return channelID, "ts", nil
 }
 
+func (m *mockSlack) UpdateMessage(channelID, timestamp string, options ...slack.MsgOption) (string, string, string, error) {
+	return channelID, timestamp, "", nil
+}
+
 type mockGitOps struct {
 	called bool
 	err    error

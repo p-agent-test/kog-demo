@@ -15,6 +15,7 @@ import (
 // and never resolves user names.
 type BotAPI interface {
 	PostMessage(channelID string, options ...slack.MsgOption) (string, string, error)
+	UpdateMessage(channelID, timestamp string, options ...slack.MsgOption) (string, string, string, error)
 	GetConversationInfo(input *slack.GetConversationInfoInput) (*slack.Channel, error)
 	AuthTest() (*slack.AuthTestResponse, error)
 }
@@ -51,6 +52,17 @@ func (s *SafeSlackClient) PostMessage(channelID string, options ...slack.MsgOpti
 		return "", "", fmt.Errorf("channel %s is not in the allowed channels list", channelID)
 	}
 	return s.inner.PostMessage(channelID, options...)
+}
+
+// UpdateMessage updates an existing message (same channel allowlist enforcement).
+func (s *SafeSlackClient) UpdateMessage(channelID, timestamp string, options ...slack.MsgOption) (string, string, string, error) {
+	if !s.allowedChannels[channelID] {
+		s.logger.Warn().
+			Str("channel_id", channelID).
+			Msg("blocked UpdateMessage to non-allowlisted channel")
+		return "", "", "", fmt.Errorf("channel %s is not in the allowed channels list", channelID)
+	}
+	return s.inner.UpdateMessage(channelID, timestamp, options...)
 }
 
 // GetConversationInfo returns channel info (read-only, safe).

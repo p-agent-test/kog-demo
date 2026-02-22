@@ -186,15 +186,26 @@ func (h *Handler) handleApproval(_ context.Context, callback slack.InteractionCa
 		requestID = parts[1]
 	}
 
-	// Update the original message with result
+	// Replace the original approval message — remove buttons, show result
 	if h.api != nil {
-		_, _, _ = h.api.PostMessage(
+		// Extract the original context text from the first section block
+		originalText := ""
+		if callback.Message.Msg.Blocks.BlockSet != nil {
+			for _, block := range callback.Message.Msg.Blocks.BlockSet {
+				if section, ok := block.(*slack.SectionBlock); ok && section.Text != nil {
+					originalText = section.Text.Text
+					break
+				}
+			}
+		}
+
+		updatedText := fmt.Sprintf("%s\n\n%s by <@%s>", originalText, status, callback.User.ID)
+
+		_, _, _, _ = h.api.UpdateMessage(
 			callback.Channel.ID,
-			slack.MsgOptionText(
-				fmt.Sprintf("%s by <@%s>", status, callback.User.ID),
-				false,
-			),
-			slack.MsgOptionTS(callback.MessageTs),
+			callback.Message.Timestamp,
+			slack.MsgOptionText(updatedText, false),
+			// No blocks = buttons removed
 		)
 	}
 

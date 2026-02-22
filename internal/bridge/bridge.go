@@ -183,9 +183,12 @@ func (b *Bridge) HandleMessage(ctx context.Context, channelID, userID, text, thr
 			Str("text", truncate(text, 100)).
 			Msg("forwarding to Kog-2")
 
-		// Show thinking indicator
+		// Show thinking indicator — defer removal so it's cleaned up on panic/restart too
 		if messageTS != "" {
 			_ = b.poster.AddReaction(channelID, messageTS, "hourglass_flowing_sand")
+			defer func() {
+				_ = b.poster.RemoveReaction(channelID, messageTS, "hourglass_flowing_sand")
+			}()
 		}
 
 		// Build session ID from channel
@@ -201,11 +204,6 @@ func (b *Bridge) HandleMessage(ctx context.Context, channelID, userID, text, thr
 		b.registerSessionContext(sessionID, channelID, ctxThread)
 
 		resp, err := b.callAgent(ctx, sessionID, channelID, ctxThread, userID, text)
-
-		// Remove thinking indicator
-		if messageTS != "" {
-			_ = b.poster.RemoveReaction(channelID, messageTS, "hourglass_flowing_sand")
-		}
 
 		if err != nil {
 			b.logger.Error().Err(err).Msg("openclaw agent call failed")
