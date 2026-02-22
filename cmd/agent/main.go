@@ -271,11 +271,20 @@ func main() {
 
 				wsClient := bridge.NewWSClient(wsCfg, logger)
 				if connErr := wsClient.Connect(ctx); connErr != nil {
-					logger.Fatal().Err(connErr).Msg("WS bridge connect failed")
+					logger.Warn().Err(connErr).Msg("⚠️ WS bridge connect failed — falling back to CLI bridge")
+					// Fallback to CLI bridge
+					slackBridge = bridge.New(bridge.Config{
+						OpenClawBin:   cfg.OpenClawBin,
+						GatewayURL:    cfg.OpenClawURL,
+						GatewayToken:  cfg.OpenClawToken,
+						BotUserID:     botUserID,
+						MaxConcurrent: 5,
+					}, bridge.NewSlackPoster(slackApp), logger)
+					logger.Info().Msg("📟 CLI bridge active (fallback from WS failure)")
+				} else {
+					slackBridge = bridge.NewWSBridge(wsClient, bridge.NewSlackPoster(slackApp), botUserID, logger)
+					logger.Info().Msg("🔌 WS bridge active (persistent WebSocket)")
 				}
-
-				slackBridge = bridge.NewWSBridge(wsClient, bridge.NewSlackPoster(slackApp), botUserID, logger)
-				logger.Info().Msg("🔌 WS bridge active (persistent WebSocket)")
 			} else {
 				// CLI bridge — openclaw agent CLI
 				slackBridge = bridge.New(bridge.Config{
