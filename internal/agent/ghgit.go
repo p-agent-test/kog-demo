@@ -53,20 +53,13 @@ func (a *Agent) ghGitCommit(ctx context.Context, client *gh.Client, params json.
 		p.Base = "main"
 	}
 
-	// Step 1: Get or create the branch ref
-	branchSHA, err := a.ensureBranch(ctx, client, p.Owner, p.Repo, p.Branch, p.Base)
+	// Step 1: Check if repo is empty (no branches) or get existing branch
+	branchSHA, isEmpty, err := a.getBranchOrDetectEmpty(ctx, client, p.Owner, p.Repo, p.Branch, p.Base)
 	if err != nil {
-		return nil, fmt.Errorf("ensuring branch: %w", err)
+		return nil, fmt.Errorf("checking repo state: %w", err)
 	}
 
-	// Step 2: Get the base tree SHA from the branch tip commit
-	baseCommit, _, err := client.Git.GetCommit(ctx, p.Owner, p.Repo, branchSHA)
-	if err != nil {
-		return nil, fmt.Errorf("getting base commit: %w", err)
-	}
-	baseTreeSHA := baseCommit.GetTree().GetSHA()
-
-	// Step 3: Create blobs for each file and build tree entries
+	// Step 2: Create blobs for each file and build tree entries
 	var treeEntries []*gh.TreeEntry
 
 	for path, content := range p.Files {
@@ -87,40 +80,65 @@ func (a *Agent) ghGitCommit(ctx context.Context, client *gh.Client, params json.
 		})
 	}
 
-	// Add deletions (tree entry with nil SHA = delete)
-	for _, path := range p.Delete {
-		treeEntries = append(treeEntries, &gh.TreeEntry{
-			Path: gh.String(path),
-			Mode: gh.String("100644"),
-			Type: gh.String("blob"),
-			// SHA intentionally nil — GitHub interprets this as delete
-		})
+	// Add deletions (tree entry with nil SHA = delete) — only for non-empty repos
+	if !isEmpty {
+		for _, path := range p.Delete {
+			treeEntries = append(treeEntries, &gh.TreeEntry{
+				Path: gh.String(path),
+				Mode: gh.String("100644"),
+				Type: gh.String("blob"),
+				// SHA intentionally nil — GitHub interprets this as delete
+			})
+		}
 	}
 
-	// Step 4: Create the new tree
-	newTree, _, err := client.Git.CreateTree(ctx, p.Owner, p.Repo, baseTreeSHA, treeEntries)
+	// Step 3: Create the new tree
+	var newTree *gh.Tree
+	if isEmpty {
+		// Empty repo — create tree without base (initial commit)
+		newTree, _, err = client.Git.CreateTree(ctx, p.Owner, p.Repo, "", treeEntries)
+	} else {
+		// Existing repo — create tree from base
+		baseCommit, _, err2 := client.Git.GetCommit(ctx, p.Owner, p.Repo, branchSHA)
+		if err2 != nil {
+			return nil, fmt.Errorf("getting base commit: %w", err2)
+		}
+		newTree, _, err = client.Git.CreateTree(ctx, p.Owner, p.Repo, baseCommit.GetTree().GetSHA(), treeEntries)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("creating tree: %w", err)
 	}
 
-	// Step 5: Create the commit
-	newCommit, _, err := client.Git.CreateCommit(ctx, p.Owner, p.Repo, &gh.Commit{
+	// Step 4: Create the commit
+	commitInput := &gh.Commit{
 		Message: gh.String(p.Message),
 		Tree:    newTree,
-		Parents: []*gh.Commit{{SHA: gh.String(branchSHA)}},
-	}, nil)
+	}
+	if !isEmpty {
+		commitInput.Parents = []*gh.Commit{{SHA: gh.String(branchSHA)}}
+	}
+	newCommit, _, err := client.Git.CreateCommit(ctx, p.Owner, p.Repo, commitInput, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating commit: %w", err)
 	}
 
-	// Step 6: Update the branch ref to point to the new commit
+	// Step 5: Create or update the branch ref
 	ref := "refs/heads/" + p.Branch
-	_, _, err = client.Git.UpdateRef(ctx, p.Owner, p.Repo, &gh.Reference{
-		Ref:    gh.String(ref),
-		Object: &gh.GitObject{SHA: newCommit.SHA},
-	}, false)
+	if isEmpty {
+		// Initial commit — create the ref
+		_, _, err = client.Git.CreateRef(ctx, p.Owner, p.Repo, &gh.Reference{
+			Ref:    gh.String(ref),
+			Object: &gh.GitObject{SHA: newCommit.SHA},
+		})
+	} else {
+		// Update existing ref
+		_, _, err = client.Git.UpdateRef(ctx, p.Owner, p.Repo, &gh.Reference{
+			Ref:    gh.String(ref),
+			Object: &gh.GitObject{SHA: newCommit.SHA},
+		}, false)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("updating ref: %w", err)
+		return nil, fmt.Errorf("setting ref: %w", err)
 	}
 
 	commitURL := fmt.Sprintf("https://github.com/%s/%s/commit/%s", p.Owner, p.Repo, newCommit.GetSHA())
@@ -298,32 +316,56 @@ func (a *Agent) ghGitListFiles(ctx context.Context, client *gh.Client, params js
 
 // --- helpers ---
 
-// ensureBranch gets the branch HEAD SHA, creating it from base if it doesn't exist.
-func (a *Agent) ensureBranch(ctx context.Context, client *gh.Client, owner, repo, branch, base string) (string, error) {
+// getBranchOrDetectEmpty checks if a branch exists. If not, checks if repo is empty.
+// Returns (branchSHA, isEmpty, error). If isEmpty=true, branchSHA is "".
+func (a *Agent) getBranchOrDetectEmpty(ctx context.Context, client *gh.Client, owner, repo, branch, base string) (string, bool, error) {
 	// Try to get existing branch
 	ref, resp, err := client.Git.GetRef(ctx, owner, repo, "refs/heads/"+branch)
 	if err == nil && ref != nil {
-		return ref.GetObject().GetSHA(), nil
-	}
-	if resp != nil && resp.StatusCode != 404 {
-		return "", fmt.Errorf("checking branch: %w", err)
+		return ref.GetObject().GetSHA(), false, nil
 	}
 
-	// Branch doesn't exist — create from base
-	baseSHA, err := a.resolveRef(ctx, client, owner, repo, base)
+	// If branch doesn't exist, check if base exists
+	if resp != nil && resp.StatusCode == 404 {
+		baseRef, baseResp, baseErr := client.Git.GetRef(ctx, owner, repo, "refs/heads/"+base)
+		if baseErr == nil && baseRef != nil {
+			// Base exists, branch doesn't — create branch from base
+			baseSHA := baseRef.GetObject().GetSHA()
+			newRef, _, createErr := client.Git.CreateRef(ctx, owner, repo, &gh.Reference{
+				Ref:    gh.String("refs/heads/" + branch),
+				Object: &gh.GitObject{SHA: gh.String(baseSHA)},
+			})
+			if createErr != nil {
+				return "", false, fmt.Errorf("creating branch from base: %w", createErr)
+			}
+			return newRef.GetObject().GetSHA(), false, nil
+		}
+
+		if baseResp != nil && baseResp.StatusCode == 404 {
+			// Neither branch nor base exists — repo is empty
+			return "", true, nil
+		}
+		if baseErr != nil {
+			return "", false, fmt.Errorf("checking base ref: %w", baseErr)
+		}
+	}
+
 	if err != nil {
-		return "", fmt.Errorf("resolving base: %w", err)
+		return "", false, fmt.Errorf("checking branch: %w", err)
 	}
+	return "", true, nil
+}
 
-	newRef, _, err := client.Git.CreateRef(ctx, owner, repo, &gh.Reference{
-		Ref:    gh.String("refs/heads/" + branch),
-		Object: &gh.GitObject{SHA: gh.String(baseSHA)},
-	})
+// ensureBranch gets the branch HEAD SHA, creating it from base if it doesn't exist.
+func (a *Agent) ensureBranch(ctx context.Context, client *gh.Client, owner, repo, branch, base string) (string, error) {
+	sha, isEmpty, err := a.getBranchOrDetectEmpty(ctx, client, owner, repo, branch, base)
 	if err != nil {
-		return "", fmt.Errorf("creating branch from base: %w", err)
+		return "", err
 	}
-
-	return newRef.GetObject().GetSHA(), nil
+	if isEmpty {
+		return "", fmt.Errorf("repo is empty (no branches) — use git.commit to create initial commit")
+	}
+	return sha, nil
 }
 
 // resolveRef resolves a branch name or SHA to a commit SHA.
