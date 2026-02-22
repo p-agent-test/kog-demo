@@ -17,15 +17,21 @@ type MessageForwarder interface {
 	IsActiveThread(channelID, threadTS string) bool
 }
 
+// ApprovalHandler processes approval/denial callbacks from interactive buttons.
+type ApprovalHandler interface {
+	OnApproval(requestID, approverID string, approved bool)
+}
+
 // Handler processes Slack events.
 // Interactive callbacks (approval buttons) are handled inline.
 // Regular messages are forwarded to Kog-2 via the MessageForwarder (bridge).
 type Handler struct {
-	api        BotAPI
-	socket     *socketmode.Client
-	logger     zerolog.Logger
-	middleware *Middleware
-	forwarder  MessageForwarder
+	api             BotAPI
+	socket          *socketmode.Client
+	logger          zerolog.Logger
+	middleware      *Middleware
+	forwarder       MessageForwarder
+	approvalHandler ApprovalHandler
 }
 
 // NewHandler creates a new event handler.
@@ -39,6 +45,11 @@ func NewHandler(logger zerolog.Logger, middleware *Middleware) *Handler {
 // SetForwarder sets the message forwarder (bridge) for routing messages to Kog-2.
 func (h *Handler) SetForwarder(f MessageForwarder) {
 	h.forwarder = f
+}
+
+// SetApprovalHandler sets the handler for approval/denial callbacks.
+func (h *Handler) SetApprovalHandler(ah ApprovalHandler) {
+	h.approvalHandler = ah
 }
 
 // SetSocket sets the Socket Mode client for acknowledging events.
@@ -169,18 +180,28 @@ func (h *Handler) handleApproval(_ context.Context, callback slack.InteractionCa
 		Bool("approved", approved).
 		Msg("approval action")
 
-	if h.api == nil {
-		return
+	// Extract request ID from action ID (format: "approve_<requestID>" or "deny_<requestID>")
+	requestID := ""
+	if parts := strings.SplitN(action.ActionID, "_", 2); len(parts) == 2 {
+		requestID = parts[1]
 	}
 
-	_, _, _ = h.api.PostMessage(
-		callback.Channel.ID,
-		slack.MsgOptionText(
-			fmt.Sprintf("%s by <@%s>", status, callback.User.ID),
-			false,
-		),
-		slack.MsgOptionTS(callback.MessageTs),
-	)
+	// Update the original message with result
+	if h.api != nil {
+		_, _, _ = h.api.PostMessage(
+			callback.Channel.ID,
+			slack.MsgOptionText(
+				fmt.Sprintf("%s by <@%s>", status, callback.User.ID),
+				false,
+			),
+			slack.MsgOptionTS(callback.MessageTs),
+		)
+	}
+
+	// Trigger approval callback (grant permission + re-queue task)
+	if h.approvalHandler != nil && requestID != "" {
+		h.approvalHandler.OnApproval(requestID, callback.User.ID, approved)
+	}
 }
 
 // SendApprovalRequest sends an interactive approval message to the supervisor channel.

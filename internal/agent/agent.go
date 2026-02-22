@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -26,6 +27,22 @@ type SlackAPI interface {
 	PostMessage(channelID string, options ...slack.MsgOption) (string, string, error)
 }
 
+// TaskRequeuer allows the agent to re-queue tasks after approval.
+type TaskRequeuer interface {
+	Requeue(taskID string) error
+}
+
+// pendingApprovalInfo stores metadata for a task awaiting human approval.
+type pendingApprovalInfo struct {
+	TaskID     string
+	CallerID   string
+	Permission supervisor.Permission
+	Action     string
+	Resource   string
+	ChannelID  string // supervisor channel where buttons were posted
+	ThreadTS   string // messageTS of the approval buttons message (used as thread parent)
+}
+
 // Agent is the task executor. It receives structured commands via the Management API
 // and executes them against the configured integrations.
 type Agent struct {
@@ -39,6 +56,11 @@ type Agent struct {
 	metrics    *metrics.Metrics
 	contexts   *ContextStore
 	logger     zerolog.Logger
+
+	// Approval flow
+	pendingMu        sync.RWMutex
+	pendingApprovals map[string]*pendingApprovalInfo // requestID → info
+	requeuer         TaskRequeuer
 
 	// Config
 	supervisorChannel string
@@ -73,6 +95,7 @@ func NewAgent(
 		audit:             audit,
 		contexts:          NewContextStore(10, time.Hour),
 		logger:            logger.With().Str("component", "agent").Logger(),
+		pendingApprovals:  make(map[string]*pendingApprovalInfo),
 		supervisorChannel: cfg.SupervisorChannel,
 		jiraProjectKey:    cfg.JiraProjectKey,
 		defaultNamespace:  cfg.DefaultNamespace,
@@ -98,6 +121,94 @@ func (a *Agent) SetMetrics(m *metrics.Metrics) {
 // SetSlack sets the Slack API (used for late binding after init).
 func (a *Agent) SetSlack(api SlackAPI) {
 	a.slack = api
+}
+
+// SetRequeuer sets the task requeuer (used for late binding after task engine init).
+func (a *Agent) SetRequeuer(r TaskRequeuer) {
+	a.requeuer = r
+}
+
+// OnApproval handles an approval/denial callback from Slack interactive buttons.
+// It grants or denies the permission and re-queues the task if approved.
+func (a *Agent) OnApproval(requestID, approverID string, approved bool) {
+	a.pendingMu.Lock()
+	info, ok := a.pendingApprovals[requestID]
+	if ok {
+		delete(a.pendingApprovals, requestID)
+	}
+	a.pendingMu.Unlock()
+
+	if !ok {
+		a.logger.Warn().Str("request_id", requestID).Msg("approval for unknown request — ignoring")
+		return
+	}
+
+	// Build reply options — always thread under the original approval buttons message
+	replyOpts := func(text string) []slack.MsgOption {
+		opts := []slack.MsgOption{slack.MsgOptionText(text, false)}
+		if info.ThreadTS != "" {
+			opts = append(opts, slack.MsgOptionTS(info.ThreadTS))
+		}
+		return opts
+	}
+	replyChannel := info.ChannelID
+	if replyChannel == "" {
+		replyChannel = a.supervisorChannel
+	}
+
+	if !approved {
+		a.audit.Record(models.AuditEntry{
+			UserID:   info.CallerID,
+			Action:   info.Action,
+			Resource: info.Resource,
+			Result:   "denied_by_human",
+			Details:  fmt.Sprintf("denied by %s, request=%s", approverID, requestID),
+		})
+		a.logger.Info().
+			Str("request_id", requestID).
+			Str("approver", approverID).
+			Msg("approval denied — task will remain failed")
+
+		if a.slack != nil && replyChannel != "" {
+			_, _, _ = a.slack.PostMessage(replyChannel,
+				replyOpts(fmt.Sprintf("❌ *Denied* `%s` on `%s` (by <@%s>)", info.Action, info.Resource, approverID))...)
+		}
+		return
+	}
+
+	// Grant the permission
+	a.supervisor.GrantPermission(info.Permission, info.CallerID, approverID, info.TaskID)
+
+	a.logger.Info().
+		Str("request_id", requestID).
+		Str("task_id", info.TaskID).
+		Str("approver", approverID).
+		Msg("approval granted — re-queueing task")
+
+	// Re-queue the task
+	if a.requeuer != nil {
+		if err := a.requeuer.Requeue(info.TaskID); err != nil {
+			a.logger.Error().Err(err).Str("task_id", info.TaskID).Msg("failed to requeue task after approval")
+			if a.slack != nil && replyChannel != "" {
+				_, _, _ = a.slack.PostMessage(replyChannel,
+					replyOpts(fmt.Sprintf("⚠️ Approved but failed to re-queue task `%s`: %v", info.TaskID, err))...)
+			}
+			return
+		}
+	}
+
+	if a.slack != nil && replyChannel != "" {
+		_, _, _ = a.slack.PostMessage(replyChannel,
+			replyOpts(fmt.Sprintf("✅ *Approved & re-queued* `%s` on `%s` (by <@%s>)\nTask `%s` executing…",
+				info.Action, info.Resource, approverID, info.TaskID))...)
+	}
+}
+
+// registerPendingApproval stores task info for later approval callback.
+func (a *Agent) registerPendingApproval(requestID string, info *pendingApprovalInfo) {
+	a.pendingMu.Lock()
+	a.pendingApprovals[requestID] = info
+	a.pendingMu.Unlock()
 }
 
 // Execute implements mgmt.TaskExecutor. It is the main entry point called by TaskEngine.
@@ -979,14 +1090,15 @@ func safeRawJSON(raw json.RawMessage) json.RawMessage {
 }
 
 // sendApprovalButtons sends interactive approval buttons to the supervisor channel.
-func (a *Agent) sendApprovalButtons(channelID, threadTS, requestID, userID, action, resource string) {
+// Returns the channel and messageTS of the posted message (for threading follow-ups).
+func (a *Agent) sendApprovalButtons(channelID, threadTS, requestID, userID, action, resource string) (postedChannel, postedTS string) {
 	if a.slack == nil {
-		return
+		return "", ""
 	}
 	blocks := []slack.Block{
 		slack.NewSectionBlock(
 			slack.NewTextBlockObject("mrkdwn",
-				fmt.Sprintf("🔐 *Approval Required*\n*User:* <@%s>\n*Action:* %s\n*Resource:* %s",
+				fmt.Sprintf("🔐 *Approval Required*\n*User:* <@%s>\n*Action:* %s\n*Resource:* %s\n*Task:* awaiting approval…",
 					userID, action, resource),
 				false, false),
 			nil, nil,
@@ -1009,7 +1121,14 @@ func (a *Agent) sendApprovalButtons(channelID, threadTS, requestID, userID, acti
 		target = channelID
 	}
 
-	_, _, _ = a.slack.PostMessage(target, slack.MsgOptionBlocks(blocks...))
+	var opts []slack.MsgOption
+	opts = append(opts, slack.MsgOptionBlocks(blocks...))
+	if threadTS != "" {
+		opts = append(opts, slack.MsgOptionTS(threadTS))
+	}
+
+	_, ts, _ := a.slack.PostMessage(target, opts...)
+	return target, ts
 }
 
 // showPolicies formats and returns the current policies as a Slack message.

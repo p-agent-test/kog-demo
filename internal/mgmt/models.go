@@ -13,11 +13,12 @@ import (
 type TaskStatus string
 
 const (
-	TaskPending   TaskStatus = "pending"
-	TaskRunning   TaskStatus = "running"
-	TaskCompleted TaskStatus = "completed"
-	TaskFailed    TaskStatus = "failed"
-	TaskCancelled TaskStatus = "cancelled"
+	TaskPending          TaskStatus = "pending"
+	TaskRunning          TaskStatus = "running"
+	TaskCompleted        TaskStatus = "completed"
+	TaskFailed           TaskStatus = "failed"
+	TaskCancelled        TaskStatus = "cancelled"
+	TaskAwaitingApproval TaskStatus = "awaiting_approval"
 )
 
 // Task represents an async unit of work submitted to the agent.

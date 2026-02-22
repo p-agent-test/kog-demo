@@ -7,7 +7,9 @@ import (
 	"strings"
 
 	gh "github.com/google/go-github/v60/github"
+	"github.com/p-blackswan/platform-agent/internal/mgmt"
 	"github.com/p-blackswan/platform-agent/internal/models"
+	"github.com/p-blackswan/platform-agent/internal/supervisor"
 )
 
 // commandClass defines the security classification of a GitHub operation.
@@ -28,6 +30,9 @@ type GHExecParams struct {
 	Operation string          `json:"operation"`
 	Params    json.RawMessage `json:"params"`
 	CallerID  string          `json:"caller_id"`
+
+	// taskID is injected at runtime from context (not from JSON).
+	taskID string
 }
 
 // GHExecResult is the result of github.exec.
@@ -86,6 +91,9 @@ func (a *Agent) executeGHExec(ctx context.Context, params json.RawMessage) (json
 		return nil, fmt.Errorf("invalid params: %w", err)
 	}
 
+	// Inject task ID from context (set by task engine) for approval tracking
+	p.taskID = mgmt.TaskIDFromContext(ctx)
+
 	if p.Operation == "" {
 		return nil, fmt.Errorf("operation is required")
 	}
@@ -109,28 +117,45 @@ func (a *Agent) executeGHExec(ctx context.Context, params json.RawMessage) (json
 		return nil, fmt.Errorf("operation %q not allowed. Allowed: %s", p.Operation, allowed)
 
 	case classWrite:
-		permResult, err := a.supervisor.RequestPermissions(ctx, "github.exec.write", p.CallerID, "")
+		permResult, err := a.supervisor.RequestPermissions(ctx, "github.exec.write", p.CallerID, p.taskID)
 		if err != nil {
 			return nil, fmt.Errorf("permission check failed: %w", err)
 		}
 		if !permResult.AllGranted {
+			if len(permResult.Denied) > 0 {
+				return nil, fmt.Errorf("permission denied: %v", permResult.Denied)
+			}
+			// Register pending approval for re-queue on callback
+			reqID := ""
+			if len(permResult.Pending) > 0 {
+				reqID = permResult.Pending[0].RequestID
+				a.registerPendingApproval(reqID, &pendingApprovalInfo{
+					TaskID:     p.taskID,
+					CallerID:   p.CallerID,
+					Permission: supervisor.PermGithubExecWrite,
+					Action:     "github.exec",
+					Resource:   p.Operation,
+				})
+			}
+			// Send Slack buttons and capture thread for follow-ups
 			if a.slack != nil && a.supervisorChannel != "" {
-				reqID := ""
-				if len(permResult.Pending) > 0 {
-					reqID = permResult.Pending[0].RequestID
+				postedCh, postedTS := a.sendApprovalButtons(a.supervisorChannel, "", reqID, p.CallerID, "github.exec", p.Operation)
+				// Update pending info with thread context
+				a.pendingMu.Lock()
+				if info, ok := a.pendingApprovals[reqID]; ok {
+					info.ChannelID = postedCh
+					info.ThreadTS = postedTS
 				}
-				a.sendApprovalButtons(a.supervisorChannel, "", reqID, p.CallerID, "github.exec", p.Operation)
+				a.pendingMu.Unlock()
 			}
 			a.audit.Record(models.AuditEntry{
 				UserID:   p.CallerID,
 				Action:   "github.exec",
 				Resource: p.Operation,
 				Result:   "pending_approval",
+				Details:  fmt.Sprintf("request_id=%s, task_id=%s", reqID, p.taskID),
 			})
-			if len(permResult.Denied) > 0 {
-				return nil, fmt.Errorf("permission denied: %v", permResult.Denied)
-			}
-			return nil, fmt.Errorf("permission pending approval")
+			return nil, fmt.Errorf("awaiting_approval: permission pending human approval (request=%s)", reqID)
 		}
 
 	case classRead:

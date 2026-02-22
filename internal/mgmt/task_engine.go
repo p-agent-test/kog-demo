@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -11,6 +12,19 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 )
+
+type contextKey string
+
+// TaskIDContextKey is the context key for passing task ID to executors.
+const TaskIDContextKey contextKey = "task_id"
+
+// TaskIDFromContext extracts the task ID from context.
+func TaskIDFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(TaskIDContextKey).(string); ok {
+		return v
+	}
+	return ""
+}
 
 // TaskExecutor defines the interface for executing tasks.
 // This allows the task engine to remain decoupled from the agent implementation.
@@ -143,6 +157,41 @@ func (te *TaskEngine) Get(id string) (*Task, bool) {
 	t := val.(*Task)
 	snap := t.Snapshot()
 	return &snap, true
+}
+
+// Requeue re-queues a task that was awaiting approval.
+func (te *TaskEngine) Requeue(id string) error {
+	val, ok := te.tasks.Load(id)
+	if !ok {
+		return fmt.Errorf("task not found: %s", id)
+	}
+
+	task := val.(*Task)
+	task.Lock()
+	if task.Status != TaskAwaitingApproval {
+		status := task.Status
+		task.Unlock()
+		return fmt.Errorf("task %s is in status %s, only awaiting_approval tasks can be requeued", id, status)
+	}
+
+	task.Status = TaskPending
+	task.Error = ""
+	task.CompletedAt = nil
+	task.Unlock()
+
+	select {
+	case te.queue <- task:
+		te.logger.Info().Str("task_id", id).Msg("task requeued after approval")
+		return nil
+	default:
+		task.Lock()
+		task.Status = TaskFailed
+		task.Error = "task queue is full (requeue)"
+		now := time.Now().UTC()
+		task.CompletedAt = &now
+		task.Unlock()
+		return fmt.Errorf("task queue is full")
+	}
 }
 
 // Cancel cancels a pending task.
@@ -330,13 +379,23 @@ func (te *TaskEngine) executeTask(ctx context.Context, task *Task, log zerolog.L
 	}
 	defer taskCancel()
 
+	taskCtx = context.WithValue(taskCtx, TaskIDContextKey, task.ID)
 	result, err := te.executor.Execute(taskCtx, task.Type, task.Params)
 	completed := time.Now().UTC()
 
 	task.Lock()
-	task.CompletedAt = &completed
 
-	if err != nil {
+	if err != nil && strings.HasPrefix(err.Error(), "awaiting_approval:") {
+		// Task is waiting for human approval — don't mark as failed
+		task.Status = TaskAwaitingApproval
+		task.Error = err.Error()
+		task.CompletedAt = nil // not completed yet
+		task.Unlock()
+		log.Info().
+			Str("task_id", task.ID).
+			Msg("task awaiting approval")
+	} else if err != nil {
+		task.CompletedAt = &completed
 		task.Status = TaskFailed
 		task.Error = err.Error()
 		task.Unlock()
@@ -344,6 +403,7 @@ func (te *TaskEngine) executeTask(ctx context.Context, task *Task, log zerolog.L
 			Str("task_id", task.ID).
 			Msg("task failed")
 	} else {
+		task.CompletedAt = &completed
 		task.Status = TaskCompleted
 		task.Result = result
 		task.Unlock()

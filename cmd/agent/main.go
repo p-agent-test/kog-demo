@@ -166,6 +166,9 @@ func main() {
 
 	taskEngine.Start(ctx)
 
+	// Wire task engine as requeuer so agent can re-queue tasks after approval
+	agentInstance.SetRequeuer(taskEngine)
+
 	rtCfg := &mgmt.RuntimeConfig{
 		Environment:    cfg.Environment,
 		LogLevel:       cfg.LogLevel,
@@ -240,6 +243,8 @@ func main() {
 
 			// Wire Slack into Agent so approval buttons can be sent
 			agentInstance.SetSlack(slackApp)
+			// Wire Agent as approval handler so Slack buttons trigger re-queue
+			slackHandler.SetApprovalHandler(agentInstance)
 
 			logger.Info().Msg("Slack Socket Mode enabled (bridge + interactive callbacks)")
 			wg.Add(1)
