@@ -69,6 +69,8 @@ var operationClassification = map[string]commandClass{
 	"git.create-branch": classWrite,
 	"git.get-file":      classRead,
 	"git.list-files":    classRead,
+	"git.get-tree":      classRead,
+	"git.get-files":     classRead,
 
 	// Dangerous — always deny
 	"pr.merge":    classDangerous,
@@ -243,6 +245,10 @@ func (a *Agent) dispatchGHOperation(ctx context.Context, client *gh.Client, op s
 		return a.ghGitGetFile(ctx, client, params)
 	case "git.list-files":
 		return a.ghGitListFiles(ctx, client, params)
+	case "git.get-tree":
+		return a.ghGitGetTree(ctx, client, params)
+	case "git.get-files":
+		return a.ghGitGetFiles(ctx, client, params)
 
 	default:
 		return nil, fmt.Errorf("unimplemented operation: %s", op)

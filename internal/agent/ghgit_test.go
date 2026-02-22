@@ -7,7 +7,7 @@ import (
 )
 
 func TestClassifyOperation_GitRead(t *testing.T) {
-	readOps := []string{"git.get-file", "git.list-files"}
+	readOps := []string{"git.get-file", "git.list-files", "git.get-tree", "git.get-files"}
 	for _, op := range readOps {
 		assert.Equal(t, classRead, classifyOperation(op), "expected read for: %s", op)
 	}
@@ -24,4 +24,6 @@ func TestListAllowedOps_IncludesGit(t *testing.T) {
 	result := listAllowedOps()
 	assert.Contains(t, result, "git.commit")
 	assert.Contains(t, result, "git.get-file")
+	assert.Contains(t, result, "git.get-tree")
+	assert.Contains(t, result, "git.get-files")
 }

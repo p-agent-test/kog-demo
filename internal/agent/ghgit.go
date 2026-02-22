@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	gh "github.com/google/go-github/v60/github"
@@ -304,6 +305,226 @@ func (a *Agent) ghGitListFiles(ctx context.Context, client *gh.Client, params js
 	}
 
 	return entries, nil
+}
+
+// ghGitGetTree recursively gets a tree structure with optional content.
+//
+// Params:
+//   - owner, repo: target repository (required)
+//   - path: path prefix to filter (optional, default: root "")
+//   - ref: branch/tag/SHA (optional, default: repo default branch)
+//   - include_content: bool (optional, default: false) — include file content for small files (<50KB)
+//   - max_depth: int (optional, default: unlimited) — maximum tree depth
+//
+// Returns: tree array with paths, types, sizes, shas, and optionally content
+func (a *Agent) ghGitGetTree(ctx context.Context, client *gh.Client, params json.RawMessage) (interface{}, error) {
+	var p struct {
+		Owner          string `json:"owner"`
+		Repo           string `json:"repo"`
+		Path           string `json:"path"`
+		Ref            string `json:"ref"`
+		IncludeContent bool   `json:"include_content"`
+		MaxDepth       int    `json:"max_depth"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if p.Owner == "" || p.Repo == "" {
+		return nil, fmt.Errorf("owner and repo are required")
+	}
+
+	// Resolve ref to SHA
+	refSHA := p.Ref
+	if refSHA == "" {
+		// Get the default branch
+		repo, _, err := client.Repositories.Get(ctx, p.Owner, p.Repo)
+		if err != nil {
+			return nil, fmt.Errorf("getting repo default branch: %w", err)
+		}
+		refSHA = repo.GetDefaultBranch()
+	}
+	commitSHA, err := a.resolveRef(ctx, client, p.Owner, p.Repo, refSHA)
+	if err != nil {
+		return nil, fmt.Errorf("resolving ref: %w", err)
+	}
+
+	// Get the full recursive tree
+	tree, _, err := client.Git.GetTree(ctx, p.Owner, p.Repo, commitSHA, true)
+	if err != nil {
+		return nil, fmt.Errorf("getting tree: %w", err)
+	}
+
+	type treeEntry struct {
+		Path      string       `json:"path"`
+		Type      string       `json:"type"` // "blob" or "tree"
+		Size      int          `json:"size,omitempty"`
+		SHA       string       `json:"sha"`
+		Content   string       `json:"content,omitempty"`
+		Truncated bool         `json:"truncated,omitempty"`
+	}
+
+	var entries []treeEntry
+	totalFiles := 0
+	truncated := false
+	const maxFiles = 200
+	const maxBlobSize = 50_000
+
+	// Filter by path prefix and max_depth, limit total files
+	for _, entry := range tree.Entries {
+		if totalFiles >= maxFiles {
+			truncated = true
+			break
+		}
+
+		path := entry.GetPath()
+
+		// Filter by path prefix if specified
+		if p.Path != "" && !strings.HasPrefix(path, p.Path) {
+			continue
+		}
+
+		// Check max_depth if specified
+		if p.MaxDepth > 0 {
+			// Count slashes in the path relative to the base
+			baseParts := 0
+			if p.Path != "" {
+				baseParts = strings.Count(p.Path, "/") + 1
+			}
+			pathParts := strings.Count(path, "/")
+			if pathParts >= baseParts+p.MaxDepth {
+				continue
+			}
+		}
+
+		treeEnt := treeEntry{
+			Path: path,
+			Type: entry.GetType(),
+			Size: entry.GetSize(),
+			SHA:  entry.GetSHA(),
+		}
+
+		// Include content for blobs if requested and small enough
+		if p.IncludeContent && entry.GetType() == "blob" && entry.GetSize() <= maxBlobSize {
+			blob, _, err := client.Git.GetBlob(ctx, p.Owner, p.Repo, entry.GetSHA())
+			if err != nil {
+				// Skip on error but don't fail — mark as truncated
+				treeEnt.Truncated = true
+			} else {
+				content := blob.GetContent()
+				if len(content) > maxBlobSize {
+					treeEnt.Content = content[:maxBlobSize]
+					treeEnt.Truncated = true
+				} else {
+					treeEnt.Content = content
+				}
+			}
+		}
+
+		entries = append(entries, treeEnt)
+		if entry.GetType() == "blob" {
+			totalFiles++
+		}
+	}
+
+	return map[string]interface{}{
+		"tree":        entries,
+		"total_files": totalFiles,
+		"truncated":   truncated,
+	}, nil
+}
+
+// ghGitGetFiles reads multiple files in parallel.
+//
+// Params:
+//   - owner, repo: target repository (required)
+//   - paths: list of file paths to fetch (required)
+//   - ref: branch/tag/SHA (optional, default: "main")
+//
+// Returns: files array with path, content, sha, size (errors per file)
+func (a *Agent) ghGitGetFiles(ctx context.Context, client *gh.Client, params json.RawMessage) (interface{}, error) {
+	var p struct {
+		Owner string   `json:"owner"`
+		Repo  string   `json:"repo"`
+		Paths []string `json:"paths"`
+		Ref   string   `json:"ref"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if p.Owner == "" || p.Repo == "" {
+		return nil, fmt.Errorf("owner and repo are required")
+	}
+	if len(p.Paths) == 0 {
+		return nil, fmt.Errorf("paths is required and must not be empty")
+	}
+
+	if p.Ref == "" {
+		p.Ref = "main"
+	}
+
+	type fileEntry struct {
+		Path    string `json:"path"`
+		Content string `json:"content,omitempty"`
+		SHA     string `json:"sha,omitempty"`
+		Size    int    `json:"size,omitempty"`
+		Error   string `json:"error,omitempty"`
+	}
+
+	opts := &gh.RepositoryContentGetOptions{Ref: p.Ref}
+
+	// Fetch files with limited concurrency (max 10 goroutines)
+	type result struct {
+		index int
+		entry fileEntry
+	}
+
+	results := make([]fileEntry, len(p.Paths))
+	resultCh := make(chan result, len(p.Paths))
+	semaphore := make(chan struct{}, 10) // Max 10 concurrent requests
+
+	for i, path := range p.Paths {
+		go func(idx int, filePath string) {
+			semaphore <- struct{}{}        // Acquire
+			defer func() { <-semaphore }() // Release
+
+			fileContent, _, _, err := client.Repositories.GetContents(ctx, p.Owner, p.Repo, filePath, opts)
+			entry := fileEntry{Path: filePath}
+
+			if err != nil {
+				entry.Error = err.Error()
+			} else if fileContent == nil {
+				entry.Error = "path is a directory, not a file"
+			} else {
+				entry.SHA = fileContent.GetSHA()
+				entry.Size = fileContent.GetSize()
+
+				rawContent, err := fileContent.GetContent()
+				if err != nil {
+					entry.Error = fmt.Sprintf("failed to decode content: %v", err)
+				} else {
+					// Truncate large files
+					const maxSize = 100_000
+					if len(rawContent) > maxSize {
+						entry.Content = rawContent[:maxSize]
+					} else {
+						entry.Content = rawContent
+					}
+				}
+			}
+
+			resultCh <- result{index: idx, entry: entry}
+		}(i, path)
+	}
+
+	// Collect results
+	for i := 0; i < len(p.Paths); i++ {
+		res := <-resultCh
+		results[res.index] = res.entry
+	}
+
+	return map[string]interface{}{
+		"files": results,
+	}, nil
 }
 
 // --- helpers ---
