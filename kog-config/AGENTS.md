@@ -230,6 +230,30 @@ curl -X POST http://localhost:8090/api/v1/tasks \
 | `issue.comment` | `owner, repo, issue_number, body` | Issue'ya yorum |
 | `repo.create` | `org?, name, description?, private?` | Repo oluştur |
 
+#### Git Operations:
+
+| Operation | Params | Classification |
+|-----------|--------|----------------|
+| `git.commit` | `owner, repo, branch, message, files:{path:content}, base?, delete?` | **write** (approval) |
+| `git.create-branch` | `owner, repo, branch, base?` | **write** (approval) |
+| `git.get-file` | `owner, repo, path, ref?` | read (auto) |
+| `git.list-files` | `owner, repo, path?, ref?` | read (auto) |
+
+`git.commit` atomic — N dosyayı tek commit'te yazar. Branch yoksa base'den otomatik oluşturur.
+
+**Örnek — branch aç + kod yaz + PR oluştur:**
+```bash
+# 1. Dosyaları commit et (branch otomatik oluşur)
+curl -X POST http://localhost:8090/api/v1/tasks \
+  -H "Content-Type: application/json" \
+  -d '{"type":"github.exec","params":{"operation":"git.commit","params":{"owner":"p-agent-test","repo":"test-service","branch":"feat/new-endpoint","base":"main","message":"feat: add health endpoint","files":{"cmd/main.go":"package main...","internal/health.go":"package internal..."}},"caller_id":"kog"}}'
+
+# 2. PR aç
+curl -X POST http://localhost:8090/api/v1/tasks \
+  -H "Content-Type: application/json" \
+  -d '{"type":"github.exec","params":{"operation":"pr.create","params":{"owner":"p-agent-test","repo":"test-service","title":"feat: add health endpoint","head":"feat/new-endpoint","base":"main"},"caller_id":"kog"}}'
+```
+
 #### Denied (always):
 `pr.merge`, `pr.close`, `issue.close`, `repo.delete` ve listelenmeyen her şey.
 
