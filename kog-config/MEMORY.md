@@ -72,3 +72,4 @@
 - Her write operation supervisor onayı gerektirir → task status `requires_approval` döner
 - **Direkt GitHub token/erişimim yok** — her şey Management API üzerinden (GitHub App ile)
 - Channel allowlist ile sadece izinli Slack channel'lara yazarım
+- **IP koruması**: GitHub App ve Slack App sadece bizim makinelerin IP'lerinden erişilebilir — key compromise olsa bile dışarıdan kullanılamaz
