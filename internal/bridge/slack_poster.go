@@ -7,6 +7,7 @@ import (
 // SlackAPI is the minimal Slack API surface needed by the bridge.
 type SlackAPI interface {
 	PostMessage(channelID string, options ...slack.MsgOption) (string, string, error)
+	UpdateMessage(channelID string, timestamp string, options ...slack.MsgOption) (string, string, string, error)
 	AddReaction(name string, item slack.ItemRef) error
 	RemoveReaction(name string, item slack.ItemRef) error
 }
@@ -28,6 +29,11 @@ func (s *slackPosterAdapter) PostMessage(channelID, text, threadTS string) (stri
 	}
 	_, ts, err := s.api.PostMessage(channelID, opts...)
 	return ts, err
+}
+
+func (s *slackPosterAdapter) UpdateMessage(channelID, messageTS, text string) error {
+	_, _, _, err := s.api.UpdateMessage(channelID, messageTS, slack.MsgOptionText(text, false))
+	return err
 }
 
 func (s *slackPosterAdapter) AddReaction(channelID, messageTS, emoji string) error {

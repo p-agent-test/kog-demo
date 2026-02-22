@@ -695,10 +695,12 @@ func (c *WSClient) SendChat(ctx context.Context, sessionKey, message string) (st
 	}
 }
 
-// waitForChatFinal waits for a chat event with state="final" for the given runId.
-// Chat events are delivered via the readLoop's event handling.
-func (c *WSClient) waitForChatFinal(ctx context.Context, sessionKey, runID string) (string, error) {
-	// Register a chat event listener
+// StreamCallback is called on each chat delta/final event.
+// deltaText is the cumulative text so far. isFinal indicates the last call.
+type StreamCallback func(deltaText string, isFinal bool)
+
+// waitForChatFinal waits for chat events and optionally calls onDelta for streaming.
+func (c *WSClient) waitForChatFinal(ctx context.Context, sessionKey, runID string, onDelta ...StreamCallback) (string, error) {
 	eventCh := make(chan chatEvent, 32)
 
 	c.mu.Lock()
@@ -714,36 +716,44 @@ func (c *WSClient) waitForChatFinal(ctx context.Context, sessionKey, runID strin
 		c.mu.Unlock()
 	}()
 
+	var cb StreamCallback
+	if len(onDelta) > 0 {
+		cb = onDelta[0]
+	}
+
 	var lastDelta string
 	for {
 		select {
 		case evt := <-eventCh:
 			switch evt.State {
 			case "delta":
-				// Extract text from message content
 				if evt.Message != nil {
-					for _, c := range evt.Message.Content {
-						if c.Type == "text" && c.Text != "" {
-							lastDelta = c.Text
+					for _, ct := range evt.Message.Content {
+						if ct.Type == "text" && ct.Text != "" {
+							lastDelta = ct.Text
 						}
 					}
 				}
+				if cb != nil && lastDelta != "" {
+					cb(lastDelta, false)
+				}
 			case "final":
+				finalText := lastDelta
 				if evt.Message != nil {
 					var texts []string
-					for _, c := range evt.Message.Content {
-						if c.Type == "text" && c.Text != "" {
-							texts = append(texts, c.Text)
+					for _, ct := range evt.Message.Content {
+						if ct.Type == "text" && ct.Text != "" {
+							texts = append(texts, ct.Text)
 						}
 					}
 					if len(texts) > 0 {
-						return strings.Join(texts, "\n"), nil
+						finalText = strings.Join(texts, "\n")
 					}
 				}
-				if lastDelta != "" {
-					return lastDelta, nil
+				if cb != nil {
+					cb(finalText, true)
 				}
-				return "", nil
+				return finalText, nil
 			case "error":
 				return "", fmt.Errorf("chat error: %s", evt.Error)
 			case "aborted":
@@ -755,6 +765,61 @@ func (c *WSClient) waitForChatFinal(ctx context.Context, sessionKey, runID strin
 		case <-ctx.Done():
 			return "", ctx.Err()
 		}
+	}
+}
+
+// SendChatStream sends a message and calls onDelta for each streaming update.
+func (c *WSClient) SendChatStream(ctx context.Context, sessionKey, message string, onDelta StreamCallback) (string, error) {
+	c.mu.Lock()
+	if !c.connected || c.conn == nil {
+		c.mu.Unlock()
+		return "", fmt.Errorf("not connected to gateway")
+	}
+	c.mu.Unlock()
+
+	idempotencyKey := uuid.New().String()
+	params := chatSendParams{
+		SessionKey:     sessionKey,
+		Message:        message,
+		Deliver:        false,
+		IdempotencyKey: idempotencyKey,
+	}
+
+	paramsJSON, _ := json.Marshal(params)
+	reqID := uuid.New().String()
+	req := wsFrame{Type: "req", ID: reqID, Method: "chat.send", Params: paramsJSON}
+
+	respCh := make(chan wsFrame, 1)
+	c.mu.Lock()
+	c.pending[reqID] = respCh
+	c.mu.Unlock()
+
+	reqBytes, _ := json.Marshal(req)
+	c.mu.Lock()
+	err := c.conn.WriteMessage(websocket.TextMessage, reqBytes)
+	c.mu.Unlock()
+	if err != nil {
+		c.mu.Lock()
+		delete(c.pending, reqID)
+		c.mu.Unlock()
+		return "", fmt.Errorf("sending chat.send: %w", err)
+	}
+
+	select {
+	case resp := <-respCh:
+		if resp.Error != nil {
+			return "", fmt.Errorf("chat.send error: %s", resp.Error.Message)
+		}
+		var chatResp chatSendResult
+		if err := json.Unmarshal(resp.Payload, &chatResp); err != nil {
+			return "", fmt.Errorf("parsing chat.send response: %w", err)
+		}
+		return c.waitForChatFinal(ctx, sessionKey, chatResp.RunID, onDelta)
+	case <-ctx.Done():
+		c.mu.Lock()
+		delete(c.pending, reqID)
+		c.mu.Unlock()
+		return "", ctx.Err()
 	}
 }
 

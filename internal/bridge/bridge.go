@@ -19,6 +19,7 @@ import (
 // SlackPoster abstracts posting messages to Slack.
 type SlackPoster interface {
 	PostMessage(channelID string, text string, threadTS string) (string, error)
+	UpdateMessage(channelID string, messageTS string, text string) error
 	AddReaction(channelID string, messageTS string, emoji string) error
 	RemoveReaction(channelID string, messageTS string, emoji string) error
 }

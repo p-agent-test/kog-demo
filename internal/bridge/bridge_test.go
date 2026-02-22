@@ -29,6 +29,7 @@ func (m *mockPoster) PostMessage(channelID, text, threadTS string) (string, erro
 	return "1234.5678", nil
 }
 
+func (m *mockPoster) UpdateMessage(_, _, _ string) error   { return nil }
 func (m *mockPoster) AddReaction(_, _, _ string) error    { return nil }
 func (m *mockPoster) RemoveReaction(_, _, _ string) error { return nil }
 

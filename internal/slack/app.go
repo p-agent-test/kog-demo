@@ -124,6 +124,11 @@ func (a *App) PostMessage(channelID string, options ...slack.MsgOption) (string,
 	return a.api.PostMessage(channelID, options...)
 }
 
+// UpdateMessage updates an existing Slack message.
+func (a *App) UpdateMessage(channelID, timestamp string, options ...slack.MsgOption) (string, string, string, error) {
+	return a.api.UpdateMessage(channelID, timestamp, options...)
+}
+
 // AddReaction adds an emoji reaction to a message.
 func (a *App) AddReaction(name string, item slack.ItemRef) error {
 	return a.api.(*SafeSlackClient).AddReaction(name, item)
