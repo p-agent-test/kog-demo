@@ -615,10 +615,12 @@ func (a *Agent) ghRepoList(ctx context.Context, client *gh.Client, params json.R
 
 func (a *Agent) ghRepoCreate(ctx context.Context, client *gh.Client, params json.RawMessage) (interface{}, error) {
 	var p struct {
+		Owner       string `json:"owner"` // org name (also accepts "org" for backward compat)
 		Org         string `json:"org"`
 		Name        string `json:"name"`
 		Description string `json:"description"`
 		Private     bool   `json:"private"`
+		AutoInit    *bool  `json:"auto_init"` // nil = true (default), explicit false = empty repo
 	}
 	if err := json.Unmarshal(params, &p); err != nil {
 		return nil, fmt.Errorf("invalid params: %w", err)
@@ -626,12 +628,20 @@ func (a *Agent) ghRepoCreate(ctx context.Context, client *gh.Client, params json
 	if p.Name == "" {
 		return nil, fmt.Errorf("name is required")
 	}
+	// Accept both "owner" and "org" — owner takes precedence
+	org := p.Owner
+	if org == "" {
+		org = p.Org
+	}
 	autoInit := true
-	repo, _, err := client.Repositories.Create(ctx, p.Org, &gh.Repository{
+	if p.AutoInit != nil {
+		autoInit = *p.AutoInit
+	}
+	repo, _, err := client.Repositories.Create(ctx, org, &gh.Repository{
 		Name:        &p.Name,
 		Description: &p.Description,
 		Private:     &p.Private,
-		AutoInit:    &autoInit, // Creates initial commit with README so repo isn't empty
+		AutoInit:    &autoInit,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating repo: %w", err)

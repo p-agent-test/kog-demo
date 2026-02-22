@@ -205,6 +205,20 @@ func (p *Policy) GetPermissionPolicy(perm Permission) PolicyLevel {
 	return PolicyRequireApproval
 }
 
+// SetAllAutoApprove sets all known permissions to auto-approve (dev/test only).
+func (p *Policy) SetAllAutoApprove() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.permPolicies == nil {
+		p.permPolicies = make(map[Permission]PolicyLevel)
+	}
+	for _, perms := range TaskPermissionMap {
+		for _, perm := range perms {
+			p.permPolicies[perm] = PolicyAutoApprove
+		}
+	}
+}
+
 // SetPermissionPolicy sets the PolicyLevel for a given Permission.
 func (p *Policy) SetPermissionPolicy(perm Permission, level PolicyLevel) {
 	p.mu.Lock()

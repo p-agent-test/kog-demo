@@ -67,6 +67,10 @@ func main() {
 
 	// Initialize supervisor
 	policy := supervisor.DefaultPolicy()
+	if cfg.SupervisorAutoApprove {
+		policy.SetAllAutoApprove()
+		logger.Warn().Msg("⚠️ SUPERVISOR_AUTO_APPROVE=true — all permissions auto-approved (dev/test only)")
+	}
 	audit := supervisor.NewAuditLog(logger)
 	sup := supervisor.NewSupervisor(policy, audit, cfg.TokenTTL, logger)
 

@@ -37,9 +37,10 @@ type Config struct {
 	JiraCloudID      string `envconfig:"JIRA_CLOUD_ID"`
 
 	// Supervisor
-	SupervisorChannel string        `envconfig:"SUPERVISOR_CHANNEL" default:"#platform-approvals"`
-	TokenTTL          time.Duration `envconfig:"TOKEN_TTL" default:"10m"`
-	ApprovalTimeout   time.Duration `envconfig:"APPROVAL_TIMEOUT" default:"30m"`
+	SupervisorChannel     string        `envconfig:"SUPERVISOR_CHANNEL" default:"#platform-approvals"`
+	SupervisorAutoApprove bool          `envconfig:"SUPERVISOR_AUTO_APPROVE" default:"false"`
+	TokenTTL              time.Duration `envconfig:"TOKEN_TTL" default:"10m"`
+	ApprovalTimeout       time.Duration `envconfig:"APPROVAL_TIMEOUT" default:"30m"`
 
 	// Bridge (Slack → Kog-2 via OpenClaw)
 	OpenClawBin      string `envconfig:"OPENCLAW_BIN" default:"openclaw"`

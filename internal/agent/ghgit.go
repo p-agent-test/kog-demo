@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"time"
 
 	gh "github.com/google/go-github/v60/github"
 )
@@ -59,6 +61,18 @@ func (a *Agent) ghGitCommit(ctx context.Context, client *gh.Client, params json.
 		return nil, fmt.Errorf("checking repo state: %w", err)
 	}
 
+	// Empty repo: GitHub Git Data API (blobs, trees, commits, refs) ALL return 409.
+	// Use Contents API to bootstrap the first file, then continue normally.
+	if isEmpty {
+		return a.ghGitCommitEmpty(ctx, client, p.Owner, p.Repo, p.Branch, p.Message, p.Files)
+	}
+
+	a.logger.Debug().
+		Str("branch", p.Branch).
+		Str("branchSHA", branchSHA).
+		Bool("isEmpty", isEmpty).
+		Msg("ghGitCommit: resolved branch state")
+
 	// Step 2: Create blobs for each file and build tree entries
 	var treeEntries []*gh.TreeEntry
 
@@ -70,41 +84,30 @@ func (a *Agent) ghGitCommit(ctx context.Context, client *gh.Client, params json.
 		if err != nil {
 			return nil, fmt.Errorf("creating blob for %s: %w", path, err)
 		}
-
-		mode := "100644" // regular file
 		treeEntries = append(treeEntries, &gh.TreeEntry{
 			Path: gh.String(path),
-			Mode: gh.String(mode),
+			Mode: gh.String("100644"),
 			Type: gh.String("blob"),
 			SHA:  blob.SHA,
 		})
 	}
 
-	// Add deletions (tree entry with nil SHA = delete) — only for non-empty repos
-	if !isEmpty {
-		for _, path := range p.Delete {
-			treeEntries = append(treeEntries, &gh.TreeEntry{
-				Path: gh.String(path),
-				Mode: gh.String("100644"),
-				Type: gh.String("blob"),
-				// SHA intentionally nil — GitHub interprets this as delete
-			})
-		}
+	// Add deletions (tree entry with nil SHA = delete)
+	for _, path := range p.Delete {
+		treeEntries = append(treeEntries, &gh.TreeEntry{
+			Path: gh.String(path),
+			Mode: gh.String("100644"),
+			Type: gh.String("blob"),
+			// SHA intentionally nil — GitHub interprets this as delete
+		})
 	}
 
-	// Step 3: Create the new tree
-	var newTree *gh.Tree
-	if isEmpty {
-		// Empty repo — create tree without base (initial commit)
-		newTree, _, err = client.Git.CreateTree(ctx, p.Owner, p.Repo, "", treeEntries)
-	} else {
-		// Existing repo — create tree from base
-		baseCommit, _, err2 := client.Git.GetCommit(ctx, p.Owner, p.Repo, branchSHA)
-		if err2 != nil {
-			return nil, fmt.Errorf("getting base commit: %w", err2)
-		}
-		newTree, _, err = client.Git.CreateTree(ctx, p.Owner, p.Repo, baseCommit.GetTree().GetSHA(), treeEntries)
+	// Step 3: Create the new tree from base
+	baseCommit, _, err := client.Git.GetCommit(ctx, p.Owner, p.Repo, branchSHA)
+	if err != nil {
+		return nil, fmt.Errorf("getting base commit: %w", err)
 	}
+	newTree, _, err := client.Git.CreateTree(ctx, p.Owner, p.Repo, baseCommit.GetTree().GetSHA(), treeEntries)
 	if err != nil {
 		return nil, fmt.Errorf("creating tree: %w", err)
 	}
@@ -113,30 +116,19 @@ func (a *Agent) ghGitCommit(ctx context.Context, client *gh.Client, params json.
 	commitInput := &gh.Commit{
 		Message: gh.String(p.Message),
 		Tree:    newTree,
-	}
-	if !isEmpty {
-		commitInput.Parents = []*gh.Commit{{SHA: gh.String(branchSHA)}}
+		Parents: []*gh.Commit{{SHA: gh.String(branchSHA)}},
 	}
 	newCommit, _, err := client.Git.CreateCommit(ctx, p.Owner, p.Repo, commitInput, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating commit: %w", err)
 	}
 
-	// Step 5: Create or update the branch ref
+	// Step 5: Update the branch ref
 	ref := "refs/heads/" + p.Branch
-	if isEmpty {
-		// Initial commit — create the ref
-		_, _, err = client.Git.CreateRef(ctx, p.Owner, p.Repo, &gh.Reference{
-			Ref:    gh.String(ref),
-			Object: &gh.GitObject{SHA: newCommit.SHA},
-		})
-	} else {
-		// Update existing ref
-		_, _, err = client.Git.UpdateRef(ctx, p.Owner, p.Repo, &gh.Reference{
-			Ref:    gh.String(ref),
-			Object: &gh.GitObject{SHA: newCommit.SHA},
-		}, false)
-	}
+	_, _, err = client.Git.UpdateRef(ctx, p.Owner, p.Repo, &gh.Reference{
+		Ref:    gh.String(ref),
+		Object: &gh.GitObject{SHA: newCommit.SHA},
+	}, false)
 	if err != nil {
 		return nil, fmt.Errorf("setting ref: %w", err)
 	}
@@ -403,4 +395,115 @@ func (a *Agent) resolveRef(ctx context.Context, client *gh.Client, owner, repo, 
 	}
 
 	return gitRef.GetObject().GetSHA(), nil
+}
+
+// ghGitCommitEmpty handles initial commits on empty repositories.
+// GitHub's Git Data API (blobs, trees, commits, refs) all return 409 for empty repos.
+// Strategy: Use Contents API to create the first file (which initializes the repo),
+// then use Git Data API for remaining files if any.
+func (a *Agent) ghGitCommitEmpty(ctx context.Context, client *gh.Client, owner, repo, branch, message string, files map[string]string) (interface{}, error) {
+	if len(files) == 0 {
+		return nil, fmt.Errorf("at least one file is required for initial commit on empty repo")
+	}
+
+	// Sort file paths for deterministic ordering
+	paths := make([]string, 0, len(files))
+	for p := range files {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+
+	// Create the first file via Contents API — this bootstraps the repo
+	firstPath := paths[0]
+	firstContent := files[firstPath]
+	commitMsg := message
+	if len(files) > 1 {
+		commitMsg = message + fmt.Sprintf(" (1/%d)", len(files))
+	}
+
+	createResp, _, err := client.Repositories.CreateFile(ctx, owner, repo, firstPath, &gh.RepositoryContentFileOptions{
+		Message: gh.String(commitMsg),
+		Content: []byte(firstContent),
+		Branch:  gh.String(branch),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating initial file %s: %w", firstPath, err)
+	}
+
+	lastSHA := createResp.Commit.GetSHA()
+
+	// If there are more files, use Git Data API now that repo is initialized
+	if len(files) > 1 {
+		// Get the branch ref — may need retry due to GitHub eventual consistency
+		var branchSHA string
+		for attempt := 0; attempt < 5; attempt++ {
+			branchRef, _, refErr := client.Git.GetRef(ctx, owner, repo, "refs/heads/"+branch)
+			if refErr == nil && branchRef != nil {
+				branchSHA = branchRef.GetObject().GetSHA()
+				break
+			}
+			if attempt < 4 {
+				time.Sleep(time.Duration(attempt+1) * 500 * time.Millisecond)
+			} else {
+				return nil, fmt.Errorf("branch %s not available after init (retried %d times): %w", branch, attempt+1, refErr)
+			}
+		}
+
+		// Create blobs + tree for remaining files
+		var treeEntries []*gh.TreeEntry
+		for _, p := range paths[1:] {
+			blob, _, err := client.Git.CreateBlob(ctx, owner, repo, &gh.Blob{
+				Content:  gh.String(files[p]),
+				Encoding: gh.String("utf-8"),
+			})
+			if err != nil {
+				return nil, fmt.Errorf("creating blob for %s: %w", p, err)
+			}
+			treeEntries = append(treeEntries, &gh.TreeEntry{
+				Path: gh.String(p),
+				Mode: gh.String("100644"),
+				Type: gh.String("blob"),
+				SHA:  blob.SHA,
+			})
+		}
+
+		baseCommit, _, err := client.Git.GetCommit(ctx, owner, repo, branchSHA)
+		if err != nil {
+			return nil, fmt.Errorf("getting base commit: %w", err)
+		}
+
+		newTree, _, err := client.Git.CreateTree(ctx, owner, repo, baseCommit.GetTree().GetSHA(), treeEntries)
+		if err != nil {
+			return nil, fmt.Errorf("creating tree for remaining files: %w", err)
+		}
+
+		newCommit, _, err := client.Git.CreateCommit(ctx, owner, repo, &gh.Commit{
+			Message: gh.String(message),
+			Tree:    newTree,
+			Parents: []*gh.Commit{{SHA: gh.String(branchSHA)}},
+		}, nil)
+		if err != nil {
+			return nil, fmt.Errorf("creating commit for remaining files: %w", err)
+		}
+
+		_, _, err = client.Git.UpdateRef(ctx, owner, repo, &gh.Reference{
+			Ref:    gh.String("refs/heads/" + branch),
+			Object: &gh.GitObject{SHA: newCommit.SHA},
+		}, false)
+		if err != nil {
+			return nil, fmt.Errorf("updating ref: %w", err)
+		}
+		lastSHA = newCommit.GetSHA()
+	}
+
+	commitURL := fmt.Sprintf("https://github.com/%s/%s/commit/%s", owner, repo, lastSHA)
+	return map[string]interface{}{
+		"sha":           lastSHA,
+		"url":           commitURL,
+		"message":       message,
+		"branch":        branch,
+		"files_changed": len(files),
+		"files_deleted": 0,
+		"initial":       true,
+	}, nil
 }
