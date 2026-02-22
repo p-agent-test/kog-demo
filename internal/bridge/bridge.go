@@ -264,12 +264,8 @@ func (b *Bridge) callAgent(ctx context.Context, sessionID, channelID, threadTS, 
 		"--timeout", fmt.Sprintf("%d", int(b.cfg.DefaultTimeout.Seconds())),
 	}
 
-	if b.cfg.GatewayURL != "" {
-		args = append(args, "--url", b.cfg.GatewayURL)
-	}
-	if b.cfg.GatewayToken != "" {
-		args = append(args, "--token", b.cfg.GatewayToken)
-	}
+	// Gateway URL and token are read from openclaw config automatically.
+	// No CLI flags needed — openclaw agent uses the local gateway.
 
 	cmd := exec.CommandContext(ctx, b.cfg.OpenClawBin, args...)
 
