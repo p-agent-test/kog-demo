@@ -29,6 +29,9 @@ func (m *mockPoster) PostMessage(channelID, text, threadTS string) (string, erro
 	return "1234.5678", nil
 }
 
+func (m *mockPoster) AddReaction(_, _, _ string) error    { return nil }
+func (m *mockPoster) RemoveReaction(_, _, _ string) error { return nil }
+
 func (m *mockPoster) count() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -42,7 +45,7 @@ func TestBridgeSkipsBotMessages(t *testing.T) {
 		MaxConcurrent: 1,
 	}, poster, zerolog.Nop())
 
-	b.HandleMessage(context.Background(), "C123", "U_BOT", "hello", "")
+	b.HandleMessage(context.Background(), "C123", "U_BOT", "hello", "", "")
 	time.Sleep(100 * time.Millisecond)
 
 	if poster.count() != 0 {
@@ -54,8 +57,8 @@ func TestBridgeSkipsEmptyMessage(t *testing.T) {
 	poster := &mockPoster{}
 	b := New(Config{MaxConcurrent: 1}, poster, zerolog.Nop())
 
-	b.HandleMessage(context.Background(), "C123", "U_USER", "", "")
-	b.HandleMessage(context.Background(), "C123", "U_USER", "   ", "")
+	b.HandleMessage(context.Background(), "C123", "U_USER", "", "", "")
+	b.HandleMessage(context.Background(), "C123", "U_USER", "   ", "", "")
 	time.Sleep(100 * time.Millisecond)
 
 	if poster.count() != 0 {
@@ -71,8 +74,8 @@ func TestBridgeStripsMention(t *testing.T) {
 	}, poster, zerolog.Nop())
 
 	// Message that's only a mention with no actual text → skip
-	b.HandleMessage(context.Background(), "C123", "U_USER", "<@U_BOT>", "")
-	b.HandleMessage(context.Background(), "C123", "U_USER", "<@U_BOT>  ", "")
+	b.HandleMessage(context.Background(), "C123", "U_USER", "<@U_BOT>", "", "")
+	b.HandleMessage(context.Background(), "C123", "U_USER", "<@U_BOT>  ", "", "")
 	time.Sleep(100 * time.Millisecond)
 
 	if poster.count() != 0 {

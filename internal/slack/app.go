@@ -63,6 +63,16 @@ func (s *SafeSlackClient) AuthTest() (*slack.AuthTestResponse, error) {
 	return s.inner.AuthTest()
 }
 
+// AddReaction adds a reaction to a message (read-level, safe).
+func (s *SafeSlackClient) AddReaction(name string, item slack.ItemRef) error {
+	return s.inner.AddReaction(name, item)
+}
+
+// RemoveReaction removes a reaction from a message (read-level, safe).
+func (s *SafeSlackClient) RemoveReaction(name string, item slack.ItemRef) error {
+	return s.inner.RemoveReaction(name, item)
+}
+
 // App is the Slack bot application using Socket Mode.
 type App struct {
 	api    BotAPI
@@ -100,6 +110,16 @@ func (a *App) AuthTest() (*slack.AuthTestResponse, error) {
 // PostMessage posts a message to a Slack channel (via SafeSlackClient).
 func (a *App) PostMessage(channelID string, options ...slack.MsgOption) (string, string, error) {
 	return a.api.PostMessage(channelID, options...)
+}
+
+// AddReaction adds an emoji reaction to a message.
+func (a *App) AddReaction(name string, item slack.ItemRef) error {
+	return a.api.(*SafeSlackClient).AddReaction(name, item)
+}
+
+// RemoveReaction removes an emoji reaction from a message.
+func (a *App) RemoveReaction(name string, item slack.ItemRef) error {
+	return a.api.(*SafeSlackClient).RemoveReaction(name, item)
 }
 
 // Run starts the Socket Mode event loop. Blocks until context is cancelled.

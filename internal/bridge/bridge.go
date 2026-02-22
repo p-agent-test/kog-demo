@@ -18,6 +18,8 @@ import (
 // SlackPoster abstracts posting messages to Slack.
 type SlackPoster interface {
 	PostMessage(channelID string, text string, threadTS string) (string, error)
+	AddReaction(channelID string, messageTS string, emoji string) error
+	RemoveReaction(channelID string, messageTS string, emoji string) error
 }
 
 // Config holds bridge configuration.
@@ -133,7 +135,8 @@ func (b *Bridge) trackThread(channelID, threadTS string) {
 // HandleMessage processes an inbound Slack message and routes it to Kog-2.
 // This is meant to be called from the Slack event handler.
 // It runs asynchronously — the response is posted back to the Slack channel.
-func (b *Bridge) HandleMessage(ctx context.Context, channelID, userID, text, threadTS string) {
+// messageTS is the timestamp of the triggering message (for reactions).
+func (b *Bridge) HandleMessage(ctx context.Context, channelID, userID, text, threadTS, messageTS string) {
 	// Skip bot's own messages
 	if userID == b.cfg.BotUserID {
 		return
@@ -175,10 +178,21 @@ func (b *Bridge) HandleMessage(ctx context.Context, channelID, userID, text, thr
 			Str("text", truncate(text, 100)).
 			Msg("forwarding to Kog-2")
 
+		// Show thinking indicator
+		if messageTS != "" {
+			_ = b.poster.AddReaction(channelID, messageTS, "hourglass_flowing_sand")
+		}
+
 		// Build session ID from channel
 		sessionID := fmt.Sprintf("%s-%s", b.cfg.SessionPrefix, channelID)
 
 		resp, err := b.callAgent(ctx, sessionID, text)
+
+		// Remove thinking indicator
+		if messageTS != "" {
+			_ = b.poster.RemoveReaction(channelID, messageTS, "hourglass_flowing_sand")
+		}
+
 		if err != nil {
 			b.logger.Error().Err(err).Msg("openclaw agent call failed")
 			if _, postErr := b.poster.PostMessage(channelID, "⚠️ Kog geçici olarak yanıt veremiyor. Tekrar deneyin.", threadTS); postErr != nil {
