@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 )
+
+// --- Functional Tests ---
 
 func TestBasicGetPut(t *testing.T) {
 	c := New[string, int](2)
@@ -30,9 +33,9 @@ func TestEviction(t *testing.T) {
 	c.Get("a")
 
 	// Insert "c" — should evict "b" (LRU)
-	evKey, evicted := c.Put("c", 3)
-	if !evicted || evKey != "b" {
-		t.Fatalf("expected eviction of 'b', got key=%v evicted=%v", evKey, evicted)
+	evKey, evVal, evicted := c.Put("c", 3)
+	if !evicted || evKey != "b" || evVal != 2 {
+		t.Fatalf("expected eviction of b=2, got key=%v val=%v evicted=%v", evKey, evVal, evicted)
 	}
 
 	if _, ok := c.Get("b"); ok {
@@ -46,6 +49,16 @@ func TestEviction(t *testing.T) {
 	}
 }
 
+func TestEvictionReturnsValue(t *testing.T) {
+	c := New[string, string](1)
+	c.Put("a", "hello")
+
+	evKey, evVal, evicted := c.Put("b", "world")
+	if !evicted || evKey != "a" || evVal != "hello" {
+		t.Fatalf("expected eviction of a=hello, got key=%v val=%v evicted=%v", evKey, evVal, evicted)
+	}
+}
+
 func TestUpdateExisting(t *testing.T) {
 	c := New[string, int](2)
 
@@ -53,7 +66,7 @@ func TestUpdateExisting(t *testing.T) {
 	c.Put("b", 2)
 
 	// Update "a" — should not evict anything
-	_, evicted := c.Put("a", 10)
+	_, _, evicted := c.Put("a", 10)
 	if evicted {
 		t.Fatal("update should not evict")
 	}
@@ -160,6 +173,202 @@ func TestPanicOnZeroCapacity(t *testing.T) {
 	New[string, int](0)
 }
 
+// --- TTL Tests ---
+
+func TestTTLExpiration(t *testing.T) {
+	now := time.Now()
+	c := New[string, int](10, WithTTL[string, int](100*time.Millisecond))
+	c.now = func() time.Time { return now }
+
+	c.Put("a", 1)
+
+	// Not expired yet
+	if v, ok := c.Get("a"); !ok || v != 1 {
+		t.Fatalf("expected a=1 before expiry, got %v %v", v, ok)
+	}
+
+	// Advance time past TTL
+	c.now = func() time.Time { return now.Add(200 * time.Millisecond) }
+
+	if _, ok := c.Get("a"); ok {
+		t.Fatal("expected 'a' to be expired")
+	}
+}
+
+func TestTTLPerEntry(t *testing.T) {
+	now := time.Now()
+	c := New[string, int](10)
+	c.now = func() time.Time { return now }
+
+	c.PutWithTTL("short", 1, 50*time.Millisecond)
+	c.PutWithTTL("long", 2, 500*time.Millisecond)
+	c.Put("forever", 3) // no TTL
+
+	// Advance 100ms — "short" expired, "long" and "forever" alive
+	c.now = func() time.Time { return now.Add(100 * time.Millisecond) }
+
+	if _, ok := c.Get("short"); ok {
+		t.Fatal("expected 'short' expired")
+	}
+	if v, ok := c.Get("long"); !ok || v != 2 {
+		t.Fatalf("expected long=2, got %v %v", v, ok)
+	}
+	if v, ok := c.Get("forever"); !ok || v != 3 {
+		t.Fatalf("expected forever=3, got %v %v", v, ok)
+	}
+}
+
+func TestTTLUpdateResetsTTL(t *testing.T) {
+	now := time.Now()
+	c := New[string, int](10, WithTTL[string, int](100*time.Millisecond))
+	c.now = func() time.Time { return now }
+
+	c.Put("a", 1)
+
+	// Advance 80ms and update
+	c.now = func() time.Time { return now.Add(80 * time.Millisecond) }
+	c.Put("a", 2)
+
+	// Advance to 150ms total — original would have expired, but update reset TTL
+	c.now = func() time.Time { return now.Add(150 * time.Millisecond) }
+	if v, ok := c.Get("a"); !ok || v != 2 {
+		t.Fatalf("expected a=2 after TTL reset, got %v %v", v, ok)
+	}
+}
+
+func TestPeekRespectsExpiration(t *testing.T) {
+	now := time.Now()
+	c := New[string, int](10, WithTTL[string, int](100*time.Millisecond))
+	c.now = func() time.Time { return now }
+
+	c.Put("a", 1)
+	c.now = func() time.Time { return now.Add(200 * time.Millisecond) }
+
+	if _, ok := c.Peek("a"); ok {
+		t.Fatal("expected Peek to return false for expired entry")
+	}
+}
+
+func TestKeysExcludesExpired(t *testing.T) {
+	now := time.Now()
+	c := New[string, int](10)
+	c.now = func() time.Time { return now }
+
+	c.PutWithTTL("expired", 1, 50*time.Millisecond)
+	c.Put("alive", 2)
+
+	c.now = func() time.Time { return now.Add(100 * time.Millisecond) }
+
+	keys := c.Keys()
+	if len(keys) != 1 || keys[0] != "alive" {
+		t.Fatalf("expected only 'alive', got %v", keys)
+	}
+}
+
+// --- OnEvict Callback Tests ---
+
+func TestOnEvictCallback(t *testing.T) {
+	var evictedKeys []string
+	var evictedVals []int
+
+	c := New[string, int](2, WithOnEvict[string, int](func(k string, v int) {
+		evictedKeys = append(evictedKeys, k)
+		evictedVals = append(evictedVals, v)
+	}))
+
+	c.Put("a", 1)
+	c.Put("b", 2)
+	c.Put("c", 3) // evicts "a"
+
+	if len(evictedKeys) != 1 || evictedKeys[0] != "a" || evictedVals[0] != 1 {
+		t.Fatalf("expected eviction callback for a=1, got keys=%v vals=%v", evictedKeys, evictedVals)
+	}
+}
+
+func TestOnEvictCalledOnTTLExpiry(t *testing.T) {
+	now := time.Now()
+	var evictedKey string
+
+	c := New[string, int](10,
+		WithTTL[string, int](100*time.Millisecond),
+		WithOnEvict[string, int](func(k string, v int) {
+			evictedKey = k
+		}),
+	)
+	c.now = func() time.Time { return now }
+
+	c.Put("a", 1)
+	c.now = func() time.Time { return now.Add(200 * time.Millisecond) }
+
+	c.Get("a") // triggers lazy expiration
+
+	if evictedKey != "a" {
+		t.Fatalf("expected OnEvict for 'a' on TTL expiry, got '%s'", evictedKey)
+	}
+}
+
+// --- Metrics Tests ---
+
+func TestMetrics(t *testing.T) {
+	c := New[string, int](2)
+
+	c.Put("a", 1)
+	c.Put("b", 2)
+
+	c.Get("a")        // hit
+	c.Get("b")        // hit
+	c.Get("missing")  // miss
+	c.Put("c", 3)     // evicts "a" (was promoted, so actually evicts oldest LRU)
+
+	m := c.Metrics()
+	if m.Hits != 2 {
+		t.Fatalf("expected 2 hits, got %d", m.Hits)
+	}
+	if m.Misses != 1 {
+		t.Fatalf("expected 1 miss, got %d", m.Misses)
+	}
+	if m.Evictions != 1 {
+		t.Fatalf("expected 1 eviction, got %d", m.Evictions)
+	}
+}
+
+func TestMetricsHitRate(t *testing.T) {
+	c := New[string, int](10)
+
+	c.Put("a", 1)
+	c.Get("a")        // hit
+	c.Get("a")        // hit
+	c.Get("a")        // hit
+	c.Get("missing")  // miss
+
+	m := c.Metrics()
+	rate := m.HitRate()
+	if rate < 0.74 || rate > 0.76 {
+		t.Fatalf("expected ~0.75 hit rate, got %f", rate)
+	}
+}
+
+func TestMetricsTTLExpiration(t *testing.T) {
+	now := time.Now()
+	c := New[string, int](10, WithTTL[string, int](100*time.Millisecond))
+	c.now = func() time.Time { return now }
+
+	c.Put("a", 1)
+	c.now = func() time.Time { return now.Add(200 * time.Millisecond) }
+
+	c.Get("a") // miss due to expiration
+
+	m := c.Metrics()
+	if m.Expirations != 1 {
+		t.Fatalf("expected 1 expiration, got %d", m.Expirations)
+	}
+	if m.Misses != 1 {
+		t.Fatalf("expected 1 miss on expired get, got %d", m.Misses)
+	}
+}
+
+// --- Concurrency Tests ---
+
 func TestConcurrentAccess(t *testing.T) {
 	c := New[int, int](100)
 	var wg sync.WaitGroup
@@ -193,10 +402,40 @@ func TestConcurrentAccess(t *testing.T) {
 	}
 }
 
+func TestConcurrentWithTTL(t *testing.T) {
+	c := New[int, int](100, WithTTL[int, int](50*time.Millisecond))
+	var wg sync.WaitGroup
+
+	for g := 0; g < 10; g++ {
+		wg.Add(1)
+		go func(offset int) {
+			defer wg.Done()
+			for i := 0; i < 500; i++ {
+				c.Put(offset*500+i, i)
+				c.Get(offset*500 + i)
+			}
+		}(g)
+	}
+
+	wg.Wait()
+
+	if c.Len() > 100 {
+		t.Fatalf("cache exceeded capacity: %d", c.Len())
+	}
+}
+
 // --- Benchmarks ---
 
 func BenchmarkPut(b *testing.B) {
 	c := New[int, int](1000)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		c.Put(i, i)
+	}
+}
+
+func BenchmarkPutWithTTL(b *testing.B) {
+	c := New[int, int](1000, WithTTL[int, int](5*time.Minute))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		c.Put(i, i)
@@ -269,4 +508,17 @@ func ExampleCache() {
 	// Output:
 	// 1
 	// false
+}
+
+func ExampleCache_withTTL() {
+	cache := New[string, int](100, WithTTL[string, int](5*time.Minute))
+
+	cache.Put("session:abc", 42)
+	cache.PutWithTTL("temp", 1, 30*time.Second) // override default TTL
+
+	m := cache.Metrics()
+	fmt.Printf("hit rate: %.0f%%\n", m.HitRate()*100)
+
+	// Output:
+	// hit rate: 0%
 }
