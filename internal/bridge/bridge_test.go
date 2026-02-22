@@ -12,18 +12,20 @@ import (
 type mockPoster struct {
 	mu       sync.Mutex
 	messages []struct {
-		channel string
-		text    string
+		channel  string
+		text     string
+		threadTS string
 	}
 }
 
-func (m *mockPoster) PostMessage(channelID, text string) (string, error) {
+func (m *mockPoster) PostMessage(channelID, text, threadTS string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.messages = append(m.messages, struct {
-		channel string
-		text    string
-	}{channelID, text})
+		channel  string
+		text     string
+		threadTS string
+	}{channelID, text, threadTS})
 	return "1234.5678", nil
 }
 

@@ -17,7 +17,7 @@ import (
 
 // SlackPoster abstracts posting messages to Slack.
 type SlackPoster interface {
-	PostMessage(channelID string, text string) (string, error)
+	PostMessage(channelID string, text string, threadTS string) (string, error)
 }
 
 // Config holds bridge configuration.
@@ -160,18 +160,18 @@ func (b *Bridge) HandleMessage(ctx context.Context, channelID, userID, text, thr
 		resp, err := b.callAgent(ctx, sessionID, text)
 		if err != nil {
 			b.logger.Error().Err(err).Msg("openclaw agent call failed")
-			if _, postErr := b.poster.PostMessage(channelID, "⚠️ Kog geçici olarak yanıt veremiyor. Tekrar deneyin."); postErr != nil {
+			if _, postErr := b.poster.PostMessage(channelID, "⚠️ Kog geçici olarak yanıt veremiyor. Tekrar deneyin.", threadTS); postErr != nil {
 				b.logger.Error().Err(postErr).Msg("failed to post error message")
 			}
 			return
 		}
 
-		// Post response payloads
+		// Post response payloads (reply in thread if original was in thread)
 		for _, payload := range resp.Result.Payloads {
 			if payload.Text == "" {
 				continue
 			}
-			if _, err := b.poster.PostMessage(channelID, payload.Text); err != nil {
+			if _, err := b.poster.PostMessage(channelID, payload.Text, threadTS); err != nil {
 				b.logger.Error().Err(err).
 					Str("channel", channelID).
 					Msg("failed to post response to Slack")

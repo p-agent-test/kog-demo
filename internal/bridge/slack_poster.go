@@ -18,7 +18,11 @@ func NewSlackPoster(api interface {
 	return &slackPosterAdapter{api: api}
 }
 
-func (s *slackPosterAdapter) PostMessage(channelID, text string) (string, error) {
-	_, ts, err := s.api.PostMessage(channelID, slack.MsgOptionText(text, false))
+func (s *slackPosterAdapter) PostMessage(channelID, text, threadTS string) (string, error) {
+	opts := []slack.MsgOption{slack.MsgOptionText(text, false)}
+	if threadTS != "" {
+		opts = append(opts, slack.MsgOptionTS(threadTS))
+	}
+	_, ts, err := s.api.PostMessage(channelID, opts...)
 	return ts, err
 }
