@@ -5,9 +5,15 @@ package bridge
 
 import (
 	"context"
+	"crypto"
+	"crypto/ed25519"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,15 +27,24 @@ type WSConfig struct {
 	// GatewayURL is the WebSocket URL, e.g. "ws://localhost:18789/ws/gateway"
 	GatewayURL string
 
-	// Token is the gateway auth token (from openclaw.json gateway.auth.token).
+	// Token is the gateway auth token. For device auth, this is the device token.
 	Token string
+
+	// DeviceID is the device identifier (hex, 64 chars). Required for device auth.
+	DeviceID string
+
+	// PublicKey is the Ed25519 public key in base64url format (raw 32 bytes, no padding).
+	PublicKey string
+
+	// PrivateKeyPEM is the Ed25519 private key in PEM format. Required for signing.
+	PrivateKeyPEM string
 
 	// ClientID identifies this client. Must be a known gateway client ID.
 	// Default: "gateway-client"
 	ClientID string
 
 	// Scopes requested from the gateway.
-	// Default: ["operator.admin"]
+	// Default: ["operator.admin", "operator.write", "operator.read"]
 	Scopes []string
 
 	// AgentTimeout is the max wait for an agent response.
@@ -81,13 +96,16 @@ type challengePayload struct {
 
 // connectParams is sent as the "connect" request.
 type connectParams struct {
-	MinProtocol int            `json:"minProtocol"`
-	MaxProtocol int            `json:"maxProtocol"`
-	Client      connectClient  `json:"client"`
-	Auth        *connectAuth   `json:"auth,omitempty"`
-	Role        string         `json:"role"`
-	Scopes      []string       `json:"scopes"`
-	Caps        []string       `json:"caps"`
+	MinProtocol int             `json:"minProtocol"`
+	MaxProtocol int             `json:"maxProtocol"`
+	Client      connectClient   `json:"client"`
+	Auth        *connectAuth    `json:"auth,omitempty"`
+	Device      *connectDevice  `json:"device,omitempty"`
+	Role        string          `json:"role"`
+	Scopes      []string        `json:"scopes"`
+	Caps        []string        `json:"caps"`
+	UserAgent   string          `json:"userAgent,omitempty"`
+	Locale      string          `json:"locale,omitempty"`
 }
 
 type connectClient struct {
@@ -101,7 +119,49 @@ type connectAuth struct {
 	Token string `json:"token,omitempty"`
 }
 
-// agentParams is the "agent" request params.
+type connectDevice struct {
+	ID        string `json:"id"`
+	PublicKey string `json:"publicKey"`
+	Signature string `json:"signature"`
+	SignedAt  int64  `json:"signedAt"`
+	Nonce     string `json:"nonce,omitempty"`
+}
+
+// chatSendParams is the "chat.send" request params.
+type chatSendParams struct {
+	SessionKey     string `json:"sessionKey"`
+	Message        string `json:"message"`
+	Deliver        bool   `json:"deliver"`
+	IdempotencyKey string `json:"idempotencyKey"`
+}
+
+// chatSendResult is the "chat.send" response payload.
+type chatSendResult struct {
+	RunID      string `json:"runId"`
+	Status     string `json:"status"`
+	AcceptedAt int64  `json:"acceptedAt"`
+}
+
+// chatEvent is a chat stream event payload.
+type chatEvent struct {
+	RunID      string       `json:"runId"`
+	SessionKey string       `json:"sessionKey"`
+	State      string       `json:"state"` // "delta", "final", "error", "aborted"
+	Message    *chatMessage `json:"message,omitempty"`
+	Error      string       `json:"errorMessage,omitempty"`
+}
+
+type chatMessage struct {
+	Role    string        `json:"role"`
+	Content []chatContent `json:"content"`
+}
+
+type chatContent struct {
+	Type string `json:"type"` // "text", "tool_use", etc.
+	Text string `json:"text,omitempty"`
+}
+
+// agentParams is the legacy "agent" request params (kept for compatibility).
 type agentParams struct {
 	Message   string `json:"message"`
 	SessionID string `json:"sessionId,omitempty"`
@@ -128,12 +188,13 @@ type WSClient struct {
 	cfg    WSConfig
 	logger zerolog.Logger
 
-	mu        sync.Mutex
-	conn      *websocket.Conn
-	connected bool
-	pending   map[string]chan wsFrame // request ID → response channel
-	stopCh    chan struct{}
-	done      chan struct{}
+	mu            sync.Mutex
+	conn          *websocket.Conn
+	connected     bool
+	pending       map[string]chan wsFrame     // request ID → response channel
+	chatListeners map[string]chan chatEvent   // runID → chat event channel
+	stopCh        chan struct{}
+	done          chan struct{}
 }
 
 // NewWSClient creates a new WebSocket client.
@@ -219,7 +280,16 @@ func (c *WSClient) handleChallenge(ctx context.Context) error {
 		return fmt.Errorf("expected connect.challenge, got %s/%s", frame.Type, frame.Event)
 	}
 
-	c.logger.Debug().Msg("received connect.challenge")
+	var challenge challengePayload
+	if err := json.Unmarshal(frame.Payload, &challenge); err != nil {
+		return fmt.Errorf("parsing challenge payload: %w", err)
+	}
+
+	noncePreview := challenge.Nonce
+	if len(noncePreview) > 16 {
+		noncePreview = noncePreview[:16] + "..."
+	}
+	c.logger.Debug().Str("nonce", noncePreview).Msg("received connect.challenge")
 
 	// Send connect request
 	params := connectParams{
@@ -231,13 +301,26 @@ func (c *WSClient) handleChallenge(ctx context.Context) error {
 			Platform: "linux",
 			Mode:     "backend",
 		},
-		Role:   "operator",
-		Scopes: c.cfg.Scopes,
-		Caps:   []string{},
+		Role:      "operator",
+		Scopes:    c.cfg.Scopes,
+		Caps:      []string{},
+		UserAgent: "platform-agent-bridge/1.0",
+		Locale:    "en",
 	}
 
 	if c.cfg.Token != "" {
 		params.Auth = &connectAuth{Token: c.cfg.Token}
+	}
+
+	// Device auth: Ed25519 signing
+	if c.cfg.DeviceID != "" && c.cfg.PrivateKeyPEM != "" {
+		signedAt := time.Now().UnixMilli()
+		device, err := c.buildDeviceAuth(challenge.Nonce, signedAt)
+		if err != nil {
+			return fmt.Errorf("device auth: %w", err)
+		}
+		params.Device = device
+		c.logger.Debug().Msg("device auth signature attached")
 	}
 
 	paramsJSON, err := json.Marshal(params)
@@ -309,6 +392,49 @@ func (c *WSClient) handleChallenge(ctx context.Context) error {
 	}
 }
 
+// buildDeviceAuth creates the device auth payload with Ed25519 signature.
+// Sign payload format (v2): "v2|deviceId|clientId|clientMode|role|scopes|signedAtMs|token|nonce"
+func (c *WSClient) buildDeviceAuth(nonce string, signedAtMs int64) (*connectDevice, error) {
+	// Parse PEM private key
+	block, _ := pem.Decode([]byte(c.cfg.PrivateKeyPEM))
+	if block == nil {
+		return nil, fmt.Errorf("failed to decode PEM private key")
+	}
+
+	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parsing private key: %w", err)
+	}
+
+	edKey, ok := key.(ed25519.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("key is not Ed25519")
+	}
+
+	// Build v2 sign payload
+	scopesStr := strings.Join(c.cfg.Scopes, ",")
+	token := c.cfg.Token
+	payload := fmt.Sprintf("v2|%s|%s|backend|operator|%s|%d|%s|%s",
+		c.cfg.DeviceID, c.cfg.ClientID, scopesStr, signedAtMs, token, nonce)
+
+	// Sign with Ed25519
+	sig, err := edKey.Sign(nil, []byte(payload), crypto.Hash(0))
+	if err != nil {
+		return nil, fmt.Errorf("signing: %w", err)
+	}
+
+	// Encode signature as base64url (no padding) — gateway expects this format
+	sigB64 := base64.RawURLEncoding.EncodeToString(sig)
+
+	return &connectDevice{
+		ID:        c.cfg.DeviceID,
+		PublicKey: c.cfg.PublicKey,
+		Signature: sigB64,
+		SignedAt:  signedAtMs,
+		Nonce:     nonce,
+	}, nil
+}
+
 // readLoop reads messages from the WebSocket and dispatches responses.
 func (c *WSClient) readLoop() {
 	defer func() {
@@ -360,7 +486,21 @@ func (c *WSClient) readLoop() {
 				ch <- frame
 			}
 		case "event":
-			// Handle tick/health/etc silently
+			if frame.Event == "chat" {
+				var evt chatEvent
+				if err := json.Unmarshal(frame.Payload, &evt); err == nil {
+					c.mu.Lock()
+					ch, ok := c.chatListeners[evt.RunID]
+					c.mu.Unlock()
+					if ok {
+						select {
+						case ch <- evt:
+						default:
+							c.logger.Warn().Str("runId", evt.RunID).Msg("chat listener full, dropping event")
+						}
+					}
+				}
+			}
 			c.logger.Trace().Str("event", frame.Event).Msg("event received")
 		}
 	}
@@ -463,6 +603,146 @@ func (c *WSClient) SendAgent(ctx context.Context, sessionID, message string) (*A
 		delete(c.pending, reqID)
 		c.mu.Unlock()
 		return nil, ctx.Err()
+	}
+}
+
+// SendChat sends a message via chat.send and streams the response via chat events.
+// Returns the final response text when the chat turn completes.
+func (c *WSClient) SendChat(ctx context.Context, sessionKey, message string) (string, error) {
+	c.mu.Lock()
+	if !c.connected || c.conn == nil {
+		c.mu.Unlock()
+		return "", fmt.Errorf("not connected to gateway")
+	}
+	c.mu.Unlock()
+
+	idempotencyKey := uuid.New().String()
+	params := chatSendParams{
+		SessionKey:     sessionKey,
+		Message:        message,
+		Deliver:        false,
+		IdempotencyKey: idempotencyKey,
+	}
+
+	paramsJSON, err := json.Marshal(params)
+	if err != nil {
+		return "", fmt.Errorf("marshaling chat params: %w", err)
+	}
+
+	reqID := uuid.New().String()
+	req := wsFrame{
+		Type:   "req",
+		ID:     reqID,
+		Method: "chat.send",
+		Params: paramsJSON,
+	}
+
+	// Register for response
+	respCh := make(chan wsFrame, 1)
+	c.mu.Lock()
+	c.pending[reqID] = respCh
+	c.mu.Unlock()
+
+	reqBytes, _ := json.Marshal(req)
+	c.mu.Lock()
+	err = c.conn.WriteMessage(websocket.TextMessage, reqBytes)
+	c.mu.Unlock()
+
+	if err != nil {
+		c.mu.Lock()
+		delete(c.pending, reqID)
+		c.mu.Unlock()
+		return "", fmt.Errorf("sending chat.send: %w", err)
+	}
+
+	c.logger.Debug().
+		Str("session", sessionKey).
+		Str("reqId", reqID).
+		Msg("chat.send request sent")
+
+	// Wait for accepted response
+	select {
+	case resp := <-respCh:
+		if resp.Error != nil {
+			return "", fmt.Errorf("chat.send error: %s", resp.Error.Message)
+		}
+		var chatResp chatSendResult
+		if err := json.Unmarshal(resp.Payload, &chatResp); err != nil {
+			return "", fmt.Errorf("parsing chat.send response: %w", err)
+		}
+		c.logger.Debug().Str("runId", chatResp.RunID).Msg("chat.send accepted")
+
+		// Now wait for the final chat event with this runId
+		return c.waitForChatFinal(ctx, sessionKey, chatResp.RunID)
+
+	case <-ctx.Done():
+		c.mu.Lock()
+		delete(c.pending, reqID)
+		c.mu.Unlock()
+		return "", ctx.Err()
+	}
+}
+
+// waitForChatFinal waits for a chat event with state="final" for the given runId.
+// Chat events are delivered via the readLoop's event handling.
+func (c *WSClient) waitForChatFinal(ctx context.Context, sessionKey, runID string) (string, error) {
+	// Register a chat event listener
+	eventCh := make(chan chatEvent, 32)
+
+	c.mu.Lock()
+	if c.chatListeners == nil {
+		c.chatListeners = make(map[string]chan chatEvent)
+	}
+	c.chatListeners[runID] = eventCh
+	c.mu.Unlock()
+
+	defer func() {
+		c.mu.Lock()
+		delete(c.chatListeners, runID)
+		c.mu.Unlock()
+	}()
+
+	var lastDelta string
+	for {
+		select {
+		case evt := <-eventCh:
+			switch evt.State {
+			case "delta":
+				// Extract text from message content
+				if evt.Message != nil {
+					for _, c := range evt.Message.Content {
+						if c.Type == "text" && c.Text != "" {
+							lastDelta = c.Text
+						}
+					}
+				}
+			case "final":
+				if evt.Message != nil {
+					var texts []string
+					for _, c := range evt.Message.Content {
+						if c.Type == "text" && c.Text != "" {
+							texts = append(texts, c.Text)
+						}
+					}
+					if len(texts) > 0 {
+						return strings.Join(texts, "\n"), nil
+					}
+				}
+				if lastDelta != "" {
+					return lastDelta, nil
+				}
+				return "", nil
+			case "error":
+				return "", fmt.Errorf("chat error: %s", evt.Error)
+			case "aborted":
+				if lastDelta != "" {
+					return lastDelta, nil
+				}
+				return "", fmt.Errorf("chat aborted")
+			}
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
 	}
 }
 
