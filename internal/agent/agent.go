@@ -205,6 +205,47 @@ func (a *Agent) OnApproval(requestID, approverID string, approved bool) {
 	}
 }
 
+// formatCompletionMessage creates a human-friendly Slack message from task results.
+// Extracts URLs, titles, numbers etc. from known result shapes.
+func (a *Agent) formatCompletionMessage(taskType string, result json.RawMessage) string {
+	// Try to extract common fields from github.exec results
+	var data map[string]interface{}
+	if err := json.Unmarshal(result, &data); err == nil {
+		// Check for nested "data" from GHExecResult wrapper
+		if inner, ok := data["data"].(map[string]interface{}); ok {
+			data = inner
+		}
+
+		url, _ := data["url"].(string)
+		title, _ := data["title"].(string)
+		number, _ := data["number"].(float64)
+		state, _ := data["state"].(string)
+
+		if url != "" {
+			parts := []string{fmt.Sprintf("✅ *%s completed*", taskType)}
+			if title != "" {
+				if number > 0 {
+					parts = append(parts, fmt.Sprintf("*#%.0f* — %s", number, title))
+				} else {
+					parts = append(parts, title)
+				}
+			}
+			if state != "" {
+				parts = append(parts, fmt.Sprintf("State: `%s`", state))
+			}
+			parts = append(parts, url)
+			return strings.Join(parts, "\n")
+		}
+	}
+
+	// Fallback: truncated JSON
+	summary := string(result)
+	if len(summary) > 500 {
+		summary = summary[:500] + "…"
+	}
+	return fmt.Sprintf("✅ *%s completed*\n```%s```", taskType, summary)
+}
+
 // registerPendingApproval stores task info for later approval callback.
 func (a *Agent) registerPendingApproval(requestID string, info *pendingApprovalInfo) {
 	a.pendingMu.Lock()
@@ -222,12 +263,7 @@ func (a *Agent) NotifyTaskCompletion(channel, threadTS, taskID, taskType string,
 	var msg string
 	switch status {
 	case mgmt.TaskCompleted:
-		// Summarize result
-		summary := string(result)
-		if len(summary) > 500 {
-			summary = summary[:500] + "…"
-		}
-		msg = fmt.Sprintf("✅ *Task completed*\n*Type:* `%s`\n*Result:* ```%s```", taskType, summary)
+		msg = a.formatCompletionMessage(taskType, result)
 	case mgmt.TaskFailed:
 		msg = fmt.Sprintf("❌ *Task failed*\n*Type:* `%s`\n*Error:* %s", taskType, taskErr)
 	default:
