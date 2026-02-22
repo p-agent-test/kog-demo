@@ -32,6 +32,10 @@ const (
 	PermSlackRead  Permission = "slack.read"
 	PermSlackWrite Permission = "slack.write"
 
+	// GitHub exec permissions
+	PermGithubExecRead  Permission = "github.exec.read"
+	PermGithubExecWrite Permission = "github.exec.write"
+
 	// Deploy permissions
 	PermDeployTest Permission = "deploy.test"
 	PermDeployProd Permission = "deploy.production" // always-deny
@@ -78,6 +82,8 @@ var TaskPermissionMap = map[string][]Permission{
 	"jira.get-issue":     {PermJiraRead},
 	"jira.create-issue":  {PermJiraWrite},
 	"slack.send-message": {PermSlackWrite},
+	"github.exec":        {PermGithubExecRead},
+	"github.exec.write":  {PermGithubExecWrite},
 	"policy.list":        {},
 	"policy.set":         {},
 	"policy.reset":       {},
@@ -141,14 +147,16 @@ func defaultPermPolicies() map[Permission]PolicyLevel {
 		PermGithubRepoRead: PolicyAutoApprove,
 		PermK8sRead:       PolicyAutoApprove,
 		PermJiraRead:      PolicyAutoApprove,
-		PermSlackRead:     PolicyAutoApprove,
+		PermSlackRead:      PolicyAutoApprove,
+		PermGithubExecRead: PolicyAutoApprove,
 
 		// Writes → require-approval
 		PermGithubPRWrite: PolicyRequireApproval,
 		PermJiraWrite:     PolicyRequireApproval,
 		PermSlackWrite:    PolicyRequireApproval,
 		PermK8sWrite:      PolicyRequireApproval,
-		PermDeployTest:    PolicyRequireApproval,
+		PermDeployTest:     PolicyRequireApproval,
+		PermGithubExecWrite: PolicyRequireApproval,
 
 		// Dangerous → always-deny
 		PermGithubPRMerge: PolicyAlwaysDeny,

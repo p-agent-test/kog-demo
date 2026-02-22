@@ -116,6 +116,8 @@ func (a *Agent) Execute(ctx context.Context, taskType string, params json.RawMes
 		result, err = a.executeGitHubReviewPR(ctx, params)
 	case "github.create-pr":
 		result, err = a.executeGitHubCreatePR(ctx, params)
+	case "github.exec":
+		result, err = a.executeGHExec(ctx, params)
 
 	// K8s tasks
 	case "k8s.pod-logs":
@@ -925,8 +927,10 @@ func isValidPermission(p supervisor.Permission) bool {
 		supervisor.PermGithubPRWrite:  true,
 		supervisor.PermGithubPRMerge:  true,
 		supervisor.PermGithubCIRead:   true,
-		supervisor.PermGithubRepoRead: true,
-		supervisor.PermK8sRead:        true,
+		supervisor.PermGithubRepoRead:  true,
+		supervisor.PermGithubExecRead:  true,
+		supervisor.PermGithubExecWrite: true,
+		supervisor.PermK8sRead:         true,
 		supervisor.PermK8sWrite:       true,
 		supervisor.PermK8sDelete:      true,
 		supervisor.PermK8sExec:        true,
