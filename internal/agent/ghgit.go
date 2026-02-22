@@ -325,8 +325,20 @@ func (a *Agent) getBranchOrDetectEmpty(ctx context.Context, client *gh.Client, o
 		return ref.GetObject().GetSHA(), false, nil
 	}
 
-	// If branch doesn't exist, check if base exists
-	if resp != nil && resp.StatusCode == 404 {
+	// GitHub returns 409 "Git Repository is empty" for empty repos,
+	// and 404 for non-existent branches in non-empty repos.
+	statusCode := 0
+	if resp != nil {
+		statusCode = resp.StatusCode
+	}
+
+	// 409 = empty repo (no commits at all)
+	if statusCode == 409 {
+		return "", true, nil
+	}
+
+	// 404 = branch doesn't exist, check if base exists
+	if statusCode == 404 {
 		baseRef, baseResp, baseErr := client.Git.GetRef(ctx, owner, repo, "refs/heads/"+base)
 		if baseErr == nil && baseRef != nil {
 			// Base exists, branch doesn't — create branch from base
@@ -341,7 +353,12 @@ func (a *Agent) getBranchOrDetectEmpty(ctx context.Context, client *gh.Client, o
 			return newRef.GetObject().GetSHA(), false, nil
 		}
 
-		if baseResp != nil && baseResp.StatusCode == 404 {
+		baseStatus := 0
+		if baseResp != nil {
+			baseStatus = baseResp.StatusCode
+		}
+
+		if baseStatus == 404 || baseStatus == 409 {
 			// Neither branch nor base exists — repo is empty
 			return "", true, nil
 		}
