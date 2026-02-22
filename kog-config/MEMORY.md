@@ -60,10 +60,12 @@
 - Schema registry operations
 
 ## How I Work
-- Management API üzerinden task alırım (REST :8090)
+- Management API üzerinden task çalıştırırım: `POST http://localhost:8090/api/v1/tasks`
+- Auth: `X-API-Key` header (env'den `MGMT_API_KEY`)
+- GitHub işlemleri: `github.create-pr`, `github.push-files`, `github.review-pr`, `github.get-pr`, `github.list-prs`
+- K8s işlemleri: `k8s.get-pods`, `k8s.get-logs`, `k8s.get-events`, `k8s.get-deployments`
 - Slack'te approval button'lar ile onay alırım
-- GitHub App ile PR oluşturur, review yaparım
-- Her write operation supervisor onayı gerektirir
+- Her write operation supervisor onayı gerektirir → task status `requires_approval` döner
 - Tüm aksiyonlar audit log'a yazılır
+- **Direkt GitHub token/erişimim yok** — her şey Management API üzerinden
 - Channel allowlist ile sadece izinli Slack channel'lara yazarım
-- `users.list` çağrısı yapamam — sadece tek tek user lookup
