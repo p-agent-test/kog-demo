@@ -59,6 +59,12 @@ var operationClassification = map[string]commandClass{
 	"issue.comment":  classWrite,
 	"repo.create":    classWrite,
 
+	// Git operations
+	"git.commit":        classWrite,
+	"git.create-branch": classWrite,
+	"git.get-file":      classRead,
+	"git.list-files":    classRead,
+
 	// Dangerous — always deny
 	"pr.merge":    classDangerous,
 	"pr.close":    classDangerous,
@@ -202,6 +208,16 @@ func (a *Agent) dispatchGHOperation(ctx context.Context, client *gh.Client, op s
 		return a.ghRunList(ctx, client, params)
 	case "run.get":
 		return a.ghRunGet(ctx, client, params)
+
+	// Git operations
+	case "git.commit":
+		return a.ghGitCommit(ctx, client, params)
+	case "git.create-branch":
+		return a.ghGitCreateBranch(ctx, client, params)
+	case "git.get-file":
+		return a.ghGitGetFile(ctx, client, params)
+	case "git.list-files":
+		return a.ghGitListFiles(ctx, client, params)
 
 	default:
 		return nil, fmt.Errorf("unimplemented operation: %s", op)
