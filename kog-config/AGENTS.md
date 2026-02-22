@@ -185,110 +185,98 @@ You don't have direct access to GitHub, Jira, or Kubernetes. Instead, you call t
 **Base URL:** `http://localhost:8090` (agent runs on the same machine)
 
 ### Authentication
-All requests need the `X-API-Key` header. The key is in your environment or OpenClaw config.
+If `MGMT_AUTH_MODE=api-key`: all requests need `X-API-Key` header.
+If `MGMT_AUTH_MODE=none`: no auth needed (dev/test mode).
 
 ### Task Flow
 1. **Create a task** → `POST /api/v1/tasks`
-2. **Poll for result** → `GET /api/v1/tasks/{id}` (or receive callback)
+2. **Poll for result** → `GET /api/v1/tasks/{id}`
 3. **Report result** to the user
 
-### Common Task Examples
+### GitHub Operations — `github.exec` task type
 
-**GitHub — Create a PR:**
+**Primary task type for all GitHub operations.** Uses GitHub App (installation token) — no PAT or gh CLI needed.
+
+Format:
 ```bash
 curl -X POST http://localhost:8090/api/v1/tasks \
-  -H "X-API-Key: $MGMT_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{
-    "type": "github.create-pr",
-    "params": {
-      "org": "p-agent-test",
-      "repo": "test-service",
-      "base": "main",
-      "head": "feat/my-feature",
-      "title": "feat: add new endpoint",
-      "body": "Description here"
-    }
-  }'
+  -d '{"type": "github.exec", "params": {"operation": "<op>", "params": {...}, "caller_id": "kog"}}'
 ```
 
-**GitHub — Review a PR:**
+#### Read Operations (auto-approve):
+
+| Operation | Params | Description |
+|-----------|--------|-------------|
+| `pr.list` | `owner, repo, state?` | PR listesi (default: open) |
+| `pr.get` | `owner, repo, pr_number` | Tek PR detayı |
+| `pr.files` | `owner, repo, pr_number` | PR'daki değişen dosyalar |
+| `pr.checks` | `owner, repo, pr_number` | CI check durumları |
+| `issue.list` | `owner, repo, state?` | Issue listesi |
+| `issue.get` | `owner, repo, issue_number` | Tek issue detayı |
+| `repo.get` | `owner, repo` | Repo bilgisi |
+| `repo.list` | `org` | Org'daki repolar |
+| `run.list` | `owner, repo` | Workflow run'ları |
+| `run.get` | `owner, repo, run_id` | Tek run detayı |
+
+#### Write Operations (approval gerekli — Slack button):
+
+| Operation | Params | Description |
+|-----------|--------|-------------|
+| `pr.create` | `owner, repo, title, head, base?, body?` | PR oluştur |
+| `pr.comment` | `owner, repo, pr_number, body` | PR'a yorum |
+| `pr.review` | `owner, repo, pr_number, event?, body?` | PR review (APPROVE/REQUEST_CHANGES/COMMENT) |
+| `issue.create` | `owner, repo, title, body?, labels?` | Issue oluştur |
+| `issue.comment` | `owner, repo, issue_number, body` | Issue'ya yorum |
+| `repo.create` | `org?, name, description?, private?` | Repo oluştur |
+
+#### Denied (always):
+`pr.merge`, `pr.close`, `issue.close`, `repo.delete` ve listelenmeyen her şey.
+
+#### Örnekler:
+
+**PR listesi:**
 ```bash
 curl -X POST http://localhost:8090/api/v1/tasks \
-  -H "X-API-Key: $MGMT_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{
-    "type": "github.review-pr",
-    "params": {
-      "org": "p-agent-test",
-      "repo": "test-service",
-      "pr_number": 1
-    }
-  }'
+  -d '{"type":"github.exec","params":{"operation":"pr.list","params":{"owner":"p-agent-test","repo":"p-agent"},"caller_id":"kog"}}'
 ```
 
-**GitHub — Create branch + push files:**
+**Issue oluştur (approval gerekli):**
 ```bash
 curl -X POST http://localhost:8090/api/v1/tasks \
-  -H "X-API-Key: $MGMT_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{
-    "type": "github.push-files",
-    "params": {
-      "org": "p-agent-test",
-      "repo": "test-service",
-      "branch": "feat/my-feature",
-      "base": "main",
-      "message": "feat: add new endpoint",
-      "files": {
-        "cmd/server/main.go": "package main\n...",
-        "internal/handler.go": "package internal\n..."
-      }
-    }
-  }'
+  -d '{"type":"github.exec","params":{"operation":"issue.create","params":{"owner":"p-agent-test","repo":"p-agent","title":"Bug: something broken","body":"Details here"},"caller_id":"kog"}}'
 ```
 
-**Kubernetes — Get pod status:**
+**PR oluştur (approval gerekli):**
 ```bash
 curl -X POST http://localhost:8090/api/v1/tasks \
-  -H "X-API-Key: $MGMT_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{
-    "type": "k8s.get-pods",
-    "params": {
-      "namespace": "blackswan",
-      "label_selector": "app=match-btc-try"
-    }
-  }'
+  -d '{"type":"github.exec","params":{"operation":"pr.create","params":{"owner":"p-agent-test","repo":"p-agent","title":"feat: new feature","body":"Description","head":"feat/branch","base":"main"},"caller_id":"kog"}}'
 ```
 
-### Available Task Types
-- `github.create-pr`, `github.review-pr`, `github.push-files`, `github.get-pr`, `github.list-prs`
-- `github.create-branch`, `github.get-file`, `github.list-files`
-- `k8s.get-pods`, `k8s.get-logs`, `k8s.get-events`, `k8s.get-deployments`
-- ~~`jira.*`~~ — **Phase 2, şu an devre dışı. Jira task'ı oluşturma.**
-- `policy.list`, `policy.set`, `policy.reset`
+### Other Task Types
+- `github.review-pr` — legacy, `github.exec` `pr.files` kullan
+- `github.create-pr` — legacy (GitOps deploy PR), `github.exec` `pr.create` kullan
+- `k8s.pod-status`, `k8s.pod-logs`, `k8s.alert-triage` — K8s operations
+- `policy.list`, `policy.set`, `policy.reset` — permission policy management
+- ~~`jira.*`~~ — **Phase 2, devre dışı. Jira task'ı oluşturma.**
 
 ### Task Response
 ```json
-{
-  "id": "task-uuid",
-  "status": "completed",
-  "result": { ... },
-  "created_at": "2026-02-22T...",
-  "completed_at": "2026-02-22T..."
-}
+{"task": {"id": "uuid", "status": "completed", "result": {...}}}
 ```
 
 Statuses: `pending` → `running` → `completed` / `failed` / `requires_approval`
 
-When a task returns `requires_approval`, tell the user and wait — they'll approve via Slack button.
+When `requires_approval` → approval button Slack'te çıkar. Kullanıcı onaylarsa task çalışır.
 
 ### Key Rules
-- **Always use the Management API** for GitHub/K8s/Jira operations — never say "I don't have access"
-- Write operations (PR create, push) may need supervisor approval — the API handles this
-- If the API is unreachable, tell the user the agent service might be down
-- Use `web_fetch` or `exec curl` to call the API
+- **Always use `github.exec`** for GitHub operations — never say "I don't have access"
+- `exec curl` ile Management API'yi çağır
+- Write operations approval gerektirir — API bunu otomatik handle eder
+- API unreachable ise: agent service down olabilir, kullanıcıya söyle
 
 ---
 

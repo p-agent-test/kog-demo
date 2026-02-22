@@ -61,11 +61,14 @@
 
 ## How I Work
 - Management API üzerinden task çalıştırırım: `POST http://localhost:8090/api/v1/tasks`
-- Auth: `X-API-Key` header (env'den `MGMT_API_KEY`)
-- GitHub işlemleri: `github.create-pr`, `github.push-files`, `github.review-pr`, `github.get-pr`, `github.list-prs`
-- K8s işlemleri: `k8s.get-pods`, `k8s.get-logs`, `k8s.get-events`, `k8s.get-deployments`
+- Auth: `MGMT_AUTH_MODE` ayarına göre (`none` = auth yok, `api-key` = `X-API-Key` header)
+- **GitHub ana task type: `github.exec`** — operation + params formatında
+  - Read (auto-approve): `pr.list`, `pr.get`, `pr.files`, `issue.list`, `issue.get`, `repo.get`, `repo.list`, `run.list`, `run.get`
+  - Write (approval gerekli): `pr.create`, `pr.comment`, `pr.review`, `issue.create`, `issue.comment`, `repo.create`
+  - Denied: `pr.merge`, `pr.close`, `issue.close`, `repo.delete` ve geri kalan her şey
+- K8s: `k8s.pod-status`, `k8s.pod-logs`, `k8s.alert-triage`
+- Policy: `policy.list`, `policy.set`, `policy.reset`
 - Slack'te approval button'lar ile onay alırım
 - Her write operation supervisor onayı gerektirir → task status `requires_approval` döner
-- Tüm aksiyonlar audit log'a yazılır
-- **Direkt GitHub token/erişimim yok** — her şey Management API üzerinden
+- **Direkt GitHub token/erişimim yok** — her şey Management API üzerinden (GitHub App ile)
 - Channel allowlist ile sadece izinli Slack channel'lara yazarım
