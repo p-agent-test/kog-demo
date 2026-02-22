@@ -65,6 +65,23 @@ func (h *Handlers) SubmitTask(c *fiber.Ctx) error {
 			"Unknown task type: "+req.Type)
 	}
 
+	// Fallback: extract response routing from params if not set at top level
+	// (some callers may embed these inside params instead of top-level)
+	if req.ResponseChannel == "" && len(req.Params) > 0 {
+		var embedded struct {
+			ResponseChannel string `json:"response_channel"`
+			ResponseThread  string `json:"response_thread"`
+		}
+		if json.Unmarshal(req.Params, &embedded) == nil {
+			if embedded.ResponseChannel != "" {
+				req.ResponseChannel = embedded.ResponseChannel
+			}
+			if embedded.ResponseThread != "" {
+				req.ResponseThread = embedded.ResponseThread
+			}
+		}
+	}
+
 	task, err := h.engine.Submit(req)
 	if err != nil {
 		return problemResponse(c, fiber.StatusServiceUnavailable,

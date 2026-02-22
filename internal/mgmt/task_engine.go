@@ -144,10 +144,13 @@ func (te *TaskEngine) Submit(req SubmitTaskRequest) (*Task, error) {
 
 	select {
 	case te.queue <- task:
-		te.logger.Info().
+		logEvt := te.logger.Info().
 			Str("task_id", task.ID).
-			Str("type", task.Type).
-			Msg("task enqueued")
+			Str("type", task.Type)
+		if task.ResponseChannel != "" {
+			logEvt = logEvt.Str("response_channel", task.ResponseChannel).Str("response_thread", task.ResponseThread)
+		}
+		logEvt.Msg("task enqueued")
 	default:
 		task.Lock()
 		task.Status = TaskFailed
@@ -454,6 +457,15 @@ func (te *TaskEngine) executeTask(ctx context.Context, task *Task, log zerolog.L
 	}
 
 	// Notify response channel (Slack thread) if set and task is terminal
+	if respChannel != "" {
+		log.Info().
+			Str("task_id", taskID).
+			Str("response_channel", respChannel).
+			Str("response_thread", respThread).
+			Str("status", string(taskStatus)).
+			Bool("has_notifier", te.notifier != nil).
+			Msg("response channel routing check")
+	}
 	if te.notifier != nil && respChannel != "" && (taskStatus == TaskCompleted || taskStatus == TaskFailed) {
 		go te.notifier.NotifyTaskCompletion(respChannel, respThread, taskID, taskType, taskStatus, taskResult, taskError)
 	}
