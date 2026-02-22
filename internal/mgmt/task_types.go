@@ -16,6 +16,7 @@ const (
 	TaskTypePolicyList      = "policy.list"
 	TaskTypePolicySet       = "policy.set"
 	TaskTypePolicyReset     = "policy.reset"
+	TaskTypeGitHubExec      = "github.exec"
 )
 
 // ValidTaskTypes is the set of all supported task types.
@@ -34,6 +35,7 @@ var ValidTaskTypes = map[string]bool{
 	TaskTypePolicyList:      true,
 	TaskTypePolicySet:       true,
 	TaskTypePolicyReset:     true,
+	TaskTypeGitHubExec:      true,
 }
 
 // IsValidTaskType returns true if the task type is recognized.
