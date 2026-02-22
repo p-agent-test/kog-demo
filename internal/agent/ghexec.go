@@ -626,10 +626,12 @@ func (a *Agent) ghRepoCreate(ctx context.Context, client *gh.Client, params json
 	if p.Name == "" {
 		return nil, fmt.Errorf("name is required")
 	}
+	autoInit := true
 	repo, _, err := client.Repositories.Create(ctx, p.Org, &gh.Repository{
 		Name:        &p.Name,
 		Description: &p.Description,
 		Private:     &p.Private,
+		AutoInit:    &autoInit, // Creates initial commit with README so repo isn't empty
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating repo: %w", err)
