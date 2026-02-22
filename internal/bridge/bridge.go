@@ -191,13 +191,20 @@ func (b *Bridge) HandleMessage(ctx context.Context, channelID, userID, text, thr
 			}()
 		}
 
-		// Build session ID from channel
-		sessionID := fmt.Sprintf("%s-%s", b.cfg.SessionPrefix, channelID)
-
 		// Determine the thread TS for context injection
 		ctxThread := threadTS
 		if ctxThread == "" {
 			ctxThread = messageTS
+		}
+
+		// Build session ID: each thread gets its own isolated session
+		// Thread messages → "slack-{channel}-{threadTS}" (isolated context)
+		// Top-level DMs  → "slack-{channel}" (shared channel session)
+		var sessionID string
+		if threadTS != "" {
+			sessionID = fmt.Sprintf("%s-%s-%s", b.cfg.SessionPrefix, channelID, threadTS)
+		} else {
+			sessionID = fmt.Sprintf("%s-%s", b.cfg.SessionPrefix, channelID)
 		}
 
 		// Register Slack context with agent so async task completions route back here
