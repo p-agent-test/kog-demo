@@ -238,6 +238,9 @@ func main() {
 
 			slackHandler.SetForwarder(slackBridge)
 
+			// Wire Slack into Agent so approval buttons can be sent
+			agentInstance.SetSlack(slackApp)
+
 			logger.Info().Msg("Slack Socket Mode enabled (bridge + interactive callbacks)")
 			wg.Add(1)
 			go func() {
