@@ -67,6 +67,10 @@ func DefaultConfig() Config {
 	}
 }
 
+// ThreadLookup is an optional function to check if a thread exists in persistent storage.
+// Used for restart recovery — when in-memory activeThreads is empty.
+type ThreadLookup func(channel, threadTS string) bool
+
 // Bridge forwards Slack messages to Kog-2 and relays responses.
 type Bridge struct {
 	cfg           Config
@@ -75,6 +79,8 @@ type Bridge struct {
 	logger        zerolog.Logger
 	mu            sync.Mutex
 	activeThreads map[string]bool // channel:threadTS → tracked
+	threadLookup  ThreadLookup    // optional persistent fallback
+	threadSaver   ThreadSaver     // optional persistent writer
 }
 
 // New creates a new Bridge.
@@ -119,14 +125,47 @@ type AgentResponse struct {
 	} `json:"error"`
 }
 
+// SetThreadLookup sets an optional persistent fallback for thread tracking.
+// Used after restart when in-memory activeThreads is empty.
+func (b *Bridge) SetThreadLookup(fn ThreadLookup) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.threadLookup = fn
+}
+
 // IsActiveThread returns true if the given thread is being tracked (Kog has responded in it).
 func (b *Bridge) IsActiveThread(channelID, threadTS string) bool {
 	if threadTS == "" {
 		return false
 	}
+	key := channelID + ":" + threadTS
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.activeThreads[channelID+":"+threadTS]
+
+	// Check in-memory first
+	if b.activeThreads[key] {
+		return true
+	}
+
+	// Fallback to persistent store (restart recovery)
+	if b.threadLookup != nil && b.threadLookup(channelID, threadTS) {
+		// Promote to in-memory cache
+		b.activeThreads[key] = true
+		return true
+	}
+
+	return false
+}
+
+// ThreadSaver is an optional function to persist thread tracking to storage.
+type ThreadSaver func(channel, threadTS, sessionKey string)
+
+// SetThreadSaver sets an optional function to persist tracked threads.
+func (b *Bridge) SetThreadSaver(fn ThreadSaver) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.threadSaver = fn
 }
 
 func (b *Bridge) trackThread(channelID, threadTS string) {
@@ -134,8 +173,15 @@ func (b *Bridge) trackThread(channelID, threadTS string) {
 		return
 	}
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	b.activeThreads[channelID+":"+threadTS] = true
+	saver := b.threadSaver
+	b.mu.Unlock()
+
+	// Persist to store (non-blocking)
+	if saver != nil {
+		sessionKey := fmt.Sprintf("agent:main:slack-%s-%s", channelID, threadTS)
+		saver(channelID, threadTS, sessionKey)
+	}
 }
 
 // HandleMessage processes an inbound Slack message and routes it to Kog-2.

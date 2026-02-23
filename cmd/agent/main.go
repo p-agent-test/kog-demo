@@ -362,6 +362,31 @@ func main() {
 
 			slackHandler.SetForwarder(slackBridge)
 
+			// Wire thread persistence from SQLite for restart recovery
+			if dataStore != nil {
+				threadLookup := bridge.ThreadLookup(func(channel, threadTS string) bool {
+					ts, err := dataStore.GetThreadSession(channel, threadTS)
+					return err == nil && ts != nil
+				})
+				threadSaver := bridge.ThreadSaver(func(channel, threadTS, sessionKey string) {
+					now := time.Now().UnixMilli()
+					_ = dataStore.SaveThreadSession(&datastore.ThreadSession{
+						Channel:       channel,
+						ThreadTS:      threadTS,
+						SessionKey:    sessionKey,
+						CreatedAt:     now,
+						LastMessageAt: now,
+					})
+				})
+				if b, ok := slackBridge.(*bridge.WSBridge); ok {
+					b.SetThreadLookup(threadLookup)
+					b.SetThreadSaver(threadSaver)
+				} else if b, ok := slackBridge.(*bridge.Bridge); ok {
+					b.SetThreadLookup(threadLookup)
+					b.SetThreadSaver(threadSaver)
+				}
+			}
+
 			// Wire Slack into Agent so approval buttons can be sent
 			agentInstance.SetSlack(slackApp)
 			// Wire Agent as approval handler so Slack buttons trigger re-queue
