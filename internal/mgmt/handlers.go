@@ -8,6 +8,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/p-blackswan/platform-agent/internal/health"
+	"github.com/p-blackswan/platform-agent/internal/store"
 )
 
 // Handlers holds dependencies for HTTP handlers.
@@ -43,6 +44,14 @@ func NewHandlers(engine *TaskEngine, checker *health.Checker, sessionCtx *Sessio
 		logger:          logger.With().Str("component", "handlers").Logger(),
 		startTime:       time.Now(),
 		runtimeConfig:   rtCfg,
+	}
+}
+
+// SetSessionContextStore updates the session context store with SQLite backend
+func (h *Handlers) SetSessionContextStore(ds *store.Store) {
+	if h.sessionCtxStore != nil && ds != nil {
+		// Create a new session context store with the store backend
+		h.sessionCtxStore = NewSessionContextStore(30*time.Minute, WithStore(ds))
 	}
 }
 

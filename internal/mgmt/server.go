@@ -14,6 +14,7 @@ import (
 	"github.com/p-blackswan/platform-agent/internal/health"
 	"github.com/p-blackswan/platform-agent/internal/metrics"
 	"github.com/p-blackswan/platform-agent/internal/requestid"
+	"github.com/p-blackswan/platform-agent/internal/store"
 )
 
 // ServerConfig holds configuration for the management API server.
@@ -69,6 +70,13 @@ func NewServer(
 	s.setupRoutes(handlers, metricsCollector)
 
 	return s
+}
+
+// SetSessionContextStore updates the handlers' session context store with store backend
+func (s *Server) SetSessionContextStore(ds *store.Store) {
+	if s.handlers != nil && ds != nil {
+		s.handlers.SetSessionContextStore(ds)
+	}
 }
 
 func (s *Server) setupMiddleware(cfg ServerConfig, logger zerolog.Logger) {

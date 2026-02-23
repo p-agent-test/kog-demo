@@ -11,6 +11,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
+
+	"github.com/p-blackswan/platform-agent/internal/store"
 )
 
 type contextKey string
@@ -48,6 +50,7 @@ type TaskEngine struct {
 	executor  TaskExecutor
 	callbacks *CallbackDelivery
 	notifier  TaskCompletionNotifier
+	dataStore *store.Store // optional SQLite backend
 	logger    zerolog.Logger
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
@@ -58,6 +61,11 @@ type TaskEngine struct {
 // SetNotifier sets the completion notifier (for posting results to Slack).
 func (te *TaskEngine) SetNotifier(n TaskCompletionNotifier) {
 	te.notifier = n
+}
+
+// SetStore sets the optional SQLite backend for task persistence.
+func (te *TaskEngine) SetStore(ds *store.Store) {
+	te.dataStore = ds
 }
 
 // TaskEngineConfig holds configuration for the task engine.
@@ -139,6 +147,24 @@ func (te *TaskEngine) Submit(req SubmitTaskRequest) (*Task, error) {
 	te.taskList = append(te.taskList, task)
 	te.listMu.Unlock()
 
+	// Persist to store if available (graceful degradation)
+	if te.dataStore != nil {
+		storeTask := &store.Task{
+			ID:              task.ID,
+			Status:          string(task.Status),
+			Command:         task.Type,
+			Params:          string(task.Params),
+			CallerID:        task.CallerID,
+			ResponseChannel: task.ResponseChannel,
+			ResponseThread:  task.ResponseThread,
+			CreatedAt:       task.CreatedAt.UnixMilli(),
+			UpdatedAt:       task.CreatedAt.UnixMilli(),
+		}
+		if err := te.dataStore.SaveTask(storeTask); err != nil {
+			te.logger.Warn().Err(err).Str("task_id", task.ID).Msg("failed to persist task to store")
+		}
+	}
+
 	// Take snapshot before enqueueing (worker may modify task immediately)
 	snap := task.Snapshot()
 
@@ -159,6 +185,12 @@ func (te *TaskEngine) Submit(req SubmitTaskRequest) (*Task, error) {
 		task.CompletedAt = &now
 		task.Unlock()
 		snap = task.Snapshot()
+
+		// Update store on failure
+		if te.dataStore != nil {
+			_ = te.dataStore.UpdateTaskStatus(task.ID, string(TaskFailed))
+		}
+
 		return &snap, fmt.Errorf("task queue is full")
 	}
 
@@ -381,6 +413,11 @@ func (te *TaskEngine) executeTask(ctx context.Context, task *Task, log zerolog.L
 	task.StartedAt = &now
 	task.Unlock()
 
+	// Update store status if available
+	if te.dataStore != nil {
+		_ = te.dataStore.UpdateTaskStatus(task.ID, string(TaskRunning))
+	}
+
 	log.Info().
 		Str("task_id", task.ID).
 		Str("type", task.Type).
@@ -411,6 +448,11 @@ func (te *TaskEngine) executeTask(ctx context.Context, task *Task, log zerolog.L
 		log.Info().
 			Str("task_id", task.ID).
 			Msg("task awaiting approval")
+
+		// Update store status
+		if te.dataStore != nil {
+			_ = te.dataStore.UpdateTaskStatus(task.ID, string(TaskAwaitingApproval))
+		}
 	} else if err != nil {
 		task.CompletedAt = &completed
 		task.Status = TaskFailed
@@ -419,6 +461,11 @@ func (te *TaskEngine) executeTask(ctx context.Context, task *Task, log zerolog.L
 		log.Error().Err(err).
 			Str("task_id", task.ID).
 			Msg("task failed")
+
+		// Update store with completion
+		if te.dataStore != nil {
+			_ = te.dataStore.CompleteTask(task.ID, "", task.Error)
+		}
 	} else {
 		task.CompletedAt = &completed
 		task.Status = TaskCompleted
@@ -427,6 +474,15 @@ func (te *TaskEngine) executeTask(ctx context.Context, task *Task, log zerolog.L
 		log.Info().
 			Str("task_id", task.ID).
 			Msg("task completed")
+
+		// Update store with completion
+		if te.dataStore != nil {
+			resultStr := ""
+			if result != nil {
+				resultStr = string(result)
+			}
+			_ = te.dataStore.CompleteTask(task.ID, resultStr, "")
+		}
 	}
 
 	// Read final state for notifications

@@ -606,6 +606,8 @@ func (c *WSClient) readLoop() {
 						default:
 							c.logger.Warn().Str("runId", evt.RunID).Msg("chat listener full, dropping event")
 						}
+					} else {
+						c.logger.Warn().Str("runId", evt.RunID).Str("state", evt.State).Msg("no listener for chat event (dropped)")
 					}
 				}
 			}
@@ -775,7 +777,7 @@ func (c *WSClient) SendChat(ctx context.Context, sessionKey, message string) (st
 		c.logger.Debug().Str("runId", chatResp.RunID).Msg("chat.send accepted")
 
 		// Now wait for the final chat event with this runId
-		return c.waitForChatFinal(ctx, sessionKey, chatResp.RunID)
+		return c.waitForChatFinal(ctx, chatResp.RunID)
 
 	case <-ctx.Done():
 		c.mu.Lock()
@@ -789,8 +791,9 @@ func (c *WSClient) SendChat(ctx context.Context, sessionKey, message string) (st
 // deltaText is the cumulative text so far. isFinal indicates the last call.
 type StreamCallback func(deltaText string, isFinal bool)
 
-// waitForChatFinal waits for chat events and optionally calls onDelta for streaming.
-func (c *WSClient) waitForChatFinal(ctx context.Context, sessionKey, runID string, onDelta ...StreamCallback) (string, error) {
+// waitForChatFinal waits for chat events on the provided eventCh and optionally calls onDelta for streaming.
+// The listener must be pre-registered by the caller before calling this method.
+func (c *WSClient) waitForChatFinal(ctx context.Context, runID string, onDelta ...StreamCallback) (string, error) {
 	eventCh := make(chan chatEvent, 32)
 
 	c.mu.Lock()
@@ -901,7 +904,7 @@ func (c *WSClient) SendChatStream(ctx context.Context, sessionKey, message strin
 		if err := json.Unmarshal(resp.Payload, &chatResp); err != nil {
 			return "", fmt.Errorf("parsing chat.send response: %w", err)
 		}
-		return c.waitForChatFinal(ctx, sessionKey, chatResp.RunID, onDelta)
+		return c.waitForChatFinal(ctx, chatResp.RunID, onDelta)
 	case <-ctx.Done():
 		c.mu.Lock()
 		delete(c.pending, reqID)

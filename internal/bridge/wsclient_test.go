@@ -23,6 +23,7 @@ type mockGateway struct {
 	upgrader  websocket.Upgrader
 	token     string
 	agentFunc func(params agentParams) agentResult
+	chatFunc  func(conn *websocket.Conn, params chatSendParams) string // returns final text
 	mu        sync.Mutex
 	conns     []*websocket.Conn
 }
@@ -101,6 +102,8 @@ func (mg *mockGateway) handleWS(w http.ResponseWriter, r *http.Request) {
 			mg.handleConnect(conn, frame)
 		case "agent":
 			mg.handleAgent(conn, frame)
+		case "chat.send":
+			mg.handleChatSend(conn, frame)
 		}
 	}
 }
@@ -163,6 +166,75 @@ func (mg *mockGateway) handleAgent(conn *websocket.Conn, req wsFrame) {
 		ID:      req.ID,
 		OK:      &ok,
 		Payload: payload,
+	})
+}
+
+func (mg *mockGateway) handleChatSend(conn *websocket.Conn, req wsFrame) {
+	var params chatSendParams
+	json.Unmarshal(req.Params, &params)
+
+	// Send chat.send response with runId
+	runID := "chat-run-" + strings.TrimSuffix(req.ID, "-req")
+	chatResp := chatSendResult{
+		RunID:      runID,
+		Status:     "accepted",
+		AcceptedAt: time.Now().UnixMilli(),
+	}
+
+	ok := true
+	payload, _ := json.Marshal(chatResp)
+	conn.WriteJSON(wsFrame{
+		Type:    "res",
+		ID:      req.ID,
+		OK:      &ok,
+		Payload: payload,
+	})
+
+	// Simulate streaming: send delta then final event
+	finalText := "Chat response"
+	if mg.chatFunc != nil {
+		finalText = mg.chatFunc(conn, params)
+	}
+
+	// Send delta event
+	deltaEvent := chatEvent{
+		RunID:      runID,
+		SessionKey: params.SessionKey,
+		State:      "delta",
+		Message: &chatMessage{
+			Role: "assistant",
+			Content: []chatContent{
+				{Type: "text", Text: "Streaming response..."},
+			},
+		},
+	}
+	deltaPayload, _ := json.Marshal(deltaEvent)
+	conn.WriteJSON(wsFrame{
+		Type:    "event",
+		Event:   "chat",
+		Payload: deltaPayload,
+	})
+
+	// Small delay to simulate processing
+	time.Sleep(10 * time.Millisecond)
+
+	// Send final event
+	finalEvent := chatEvent{
+		RunID:      runID,
+		SessionKey: params.SessionKey,
+		State:      "final",
+		Message: &chatMessage{
+			Role: "assistant",
+			Content: []chatContent{
+				{Type: "text", Text: finalText},
+			},
+		},
+	}
+	finalPayload, _ := json.Marshal(finalEvent)
+	conn.WriteJSON(wsFrame{
+		Type:    "event",
+		Event:   "chat",
+		Payload: finalPayload,
 	})
 }
 
@@ -321,6 +393,105 @@ func TestWSClient_ContextCancellation(t *testing.T) {
 
 	_, err := client.SendAgent(ctx, "s1", "hello")
 	assert.Error(t, err)
+
+	client.Close()
+}
+
+func TestWSClient_SendChat(t *testing.T) {
+	gw := newMockGateway(t, "")
+	defer gw.close()
+
+	logger := zerolog.Nop()
+	cfg := DefaultWSConfig()
+	cfg.GatewayURL = gw.url()
+
+	client := NewWSClient(cfg, logger)
+	ctx := context.Background()
+
+	require.NoError(t, client.Connect(ctx))
+
+	result, err := client.SendChat(ctx, "test-session", "hello")
+	require.NoError(t, err)
+	assert.NotEmpty(t, result)
+
+	client.Close()
+}
+
+func TestWSClient_SendChatStream(t *testing.T) {
+	gw := newMockGateway(t, "")
+	gw.chatFunc = func(conn *websocket.Conn, params chatSendParams) string {
+		return "Streamed: " + params.Message
+	}
+	defer gw.close()
+
+	logger := zerolog.Nop()
+	cfg := DefaultWSConfig()
+	cfg.GatewayURL = gw.url()
+
+	client := NewWSClient(cfg, logger)
+	ctx := context.Background()
+
+	require.NoError(t, client.Connect(ctx))
+
+	var deltaTexts []string
+	var finalText string
+	var finalCalled bool
+
+	callback := func(text string, isFinal bool) {
+		if isFinal {
+			finalCalled = true
+			finalText = text
+		} else {
+			deltaTexts = append(deltaTexts, text)
+		}
+	}
+
+	result, err := client.SendChatStream(ctx, "test-session", "test message", callback)
+	require.NoError(t, err)
+	assert.NotEmpty(t, result)
+	assert.True(t, finalCalled, "final callback should have been called")
+	assert.Equal(t, finalText, result)
+
+	client.Close()
+}
+
+func TestWSClient_SendChatRaceCondition(t *testing.T) {
+	// This test verifies that the listener is registered before the response is sent
+	// If there's a race condition, the listener might miss delta/final events
+	gw := newMockGateway(t, "")
+	gw.chatFunc = func(conn *websocket.Conn, params chatSendParams) string {
+		return "Response for: " + params.Message
+	}
+	defer gw.close()
+
+	logger := zerolog.Nop()
+	cfg := DefaultWSConfig()
+	cfg.GatewayURL = gw.url()
+
+	client := NewWSClient(cfg, logger)
+	ctx := context.Background()
+
+	require.NoError(t, client.Connect(ctx))
+
+	// Run multiple concurrent chat sends to increase chance of race condition
+	var wg sync.WaitGroup
+	results := make([]string, 5)
+	errs := make([]error, 5)
+
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			msg := strings.Replace("message-X", "X", string(rune('A'+idx)), 1)
+			results[idx], errs[idx] = client.SendChat(ctx, "session", msg)
+		}(i)
+	}
+
+	wg.Wait()
+	for i := 0; i < 5; i++ {
+		assert.NoError(t, errs[i], "request %d", i)
+		assert.NotEmpty(t, results[i], "result %d", i)
+	}
 
 	client.Close()
 }

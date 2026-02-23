@@ -20,6 +20,7 @@ import (
 	"github.com/p-blackswan/platform-agent/internal/metrics"
 	"github.com/p-blackswan/platform-agent/internal/mgmt"
 	"github.com/p-blackswan/platform-agent/internal/models"
+	"github.com/p-blackswan/platform-agent/internal/store"
 	"github.com/p-blackswan/platform-agent/internal/supervisor"
 )
 
@@ -57,6 +58,7 @@ type Agent struct {
 	audit      *supervisor.AuditLog
 	metrics    *metrics.Metrics
 	contexts   *ContextStore
+	dataStore  *store.Store // optional SQLite backend
 	logger     zerolog.Logger
 
 	// Approval flow
@@ -130,6 +132,11 @@ func (a *Agent) SetRequeuer(r TaskRequeuer) {
 	a.requeuer = r
 }
 
+// SetStore sets the optional SQLite backend for persistence.
+func (a *Agent) SetStore(ds *store.Store) {
+	a.dataStore = ds
+}
+
 // OnApproval handles an approval/denial callback from Slack interactive buttons.
 // It grants or denies the permission and re-queues the task if approved.
 func (a *Agent) OnApproval(requestID, approverID string, approved bool) {
@@ -143,6 +150,11 @@ func (a *Agent) OnApproval(requestID, approverID string, approved bool) {
 	if !ok {
 		a.logger.Warn().Str("request_id", requestID).Msg("approval for unknown request — ignoring")
 		return
+	}
+
+	// Delete from store if available
+	if a.dataStore != nil {
+		_ = a.dataStore.DeleteApproval(requestID)
 	}
 
 	// Build reply options — always thread under the original approval buttons message
@@ -274,6 +286,23 @@ func (a *Agent) registerPendingApproval(requestID string, info *pendingApprovalI
 	a.pendingMu.Lock()
 	a.pendingApprovals[requestID] = info
 	a.pendingMu.Unlock()
+
+	// Also persist to store if available (graceful degradation)
+	if a.dataStore != nil {
+		approval := &store.PendingApproval{
+			RequestID: requestID,
+			TaskID:    info.TaskID,
+			CallerID:  info.CallerID,
+			Permission: string(info.Permission),
+			Action:    info.Action,
+			Resource:  info.Resource,
+			ChannelID: info.ChannelID,
+			ThreadTS:  info.ThreadTS,
+		}
+		if err := a.dataStore.SaveApproval(approval); err != nil {
+			a.logger.Warn().Err(err).Str("request_id", requestID).Msg("failed to persist approval to store")
+		}
+	}
 }
 
 // NotifyTaskCompletion posts task results to a Slack channel/thread.

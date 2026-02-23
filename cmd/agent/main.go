@@ -23,6 +23,7 @@ import (
 	jiraclient "github.com/p-blackswan/platform-agent/internal/jira"
 	"github.com/p-blackswan/platform-agent/internal/mgmt"
 	slackpkg "github.com/p-blackswan/platform-agent/internal/slack"
+	datastore "github.com/p-blackswan/platform-agent/internal/store"
 	"github.com/p-blackswan/platform-agent/internal/supervisor"
 	"github.com/p-blackswan/platform-agent/pkg/tokenstore"
 )
@@ -78,6 +79,47 @@ func main() {
 
 	// Health checker
 	checker := health.NewChecker(logger)
+
+	// Initialize SQLite store
+	dataStore, err := datastore.New(cfg.AgentDBPath, logger)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed to init SQLite store")
+	}
+	defer dataStore.Close()
+
+	// Startup recovery
+	failedCount, _ := dataStore.FailStuckTasks()
+	if failedCount > 0 {
+		logger.Info().Int64("count", failedCount).Msg("recovered stuck tasks (marked failed)")
+	}
+
+	// Start retention goroutine
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := dataStore.RunRetention(ctx); err != nil {
+					logger.Warn().Err(err).Msg("retention cleanup error")
+				}
+			}
+		}
+	}()
+
+	// Register store health check
+	checker.Register("sqlite", func(ctx context.Context) health.Status {
+		size, err := dataStore.DBSizeBytes()
+		if err != nil {
+			return health.StatusDown
+		}
+		if size > 50*1024*1024 {
+			logger.Warn().Int64("size_bytes", size).Msg("database size warning")
+		}
+		return health.StatusOK
+	})
 
 	// Initialize GitHub multi-org client (if configured)
 	var ghMulti *ghclient.MultiClient
@@ -153,6 +195,7 @@ func main() {
 		DefaultNamespace:  "default",
 		AllowedNamespaces: []string{},
 	}, logger)
+	agentInstance.SetStore(dataStore)
 
 	// HTTP server for webhooks and health
 	mux := http.NewServeMux()
@@ -185,6 +228,7 @@ func main() {
 		Workers:   cfg.MgmtWorkers,
 		QueueSize: 1000,
 	}, agentInstance, callbacks, logger)
+	taskEngine.SetStore(dataStore)
 
 	taskEngine.Start(ctx)
 
@@ -219,6 +263,9 @@ func main() {
 		TLSKey:      cfg.MgmtTLSKey,
 		Workers:     cfg.MgmtWorkers,
 	}, taskEngine, checker, nil, rtCfg, logger)
+
+	// Wire store to session context store
+	mgmtServer.SetSessionContextStore(dataStore)
 
 	// Start HTTP server
 	wg.Add(1)

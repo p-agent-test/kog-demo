@@ -78,6 +78,9 @@ type Config struct {
 	MgmtWorkers      int           `envconfig:"MGMT_WORKERS" default:"4"`
 	CallbackTimeout  time.Duration `envconfig:"CALLBACK_TIMEOUT" default:"30s"`
 	CallbackRetries  int           `envconfig:"CALLBACK_RETRIES" default:"3"`
+
+	// SQLite Store
+	AgentDBPath string `envconfig:"AGENT_DB_PATH" default:"./agent.db"`
 }
 
 // SlackEnabled returns true if Slack tokens are configured.
