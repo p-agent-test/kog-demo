@@ -17,6 +17,7 @@ type BotAPI interface {
 	PostMessage(channelID string, options ...slack.MsgOption) (string, string, error)
 	UpdateMessage(channelID, timestamp string, options ...slack.MsgOption) (string, string, string, error)
 	GetConversationInfo(input *slack.GetConversationInfoInput) (*slack.Channel, error)
+	GetConversationReplies(params *slack.GetConversationRepliesParameters) ([]slack.Message, bool, string, error)
 	AuthTest() (*slack.AuthTestResponse, error)
 }
 
@@ -68,6 +69,11 @@ func (s *SafeSlackClient) UpdateMessage(channelID, timestamp string, options ...
 // GetConversationInfo returns channel info (read-only, safe).
 func (s *SafeSlackClient) GetConversationInfo(input *slack.GetConversationInfoInput) (*slack.Channel, error) {
 	return s.inner.GetConversationInfo(input)
+}
+
+// GetConversationReplies reads thread history (read-only, safe — no allowlist check).
+func (s *SafeSlackClient) GetConversationReplies(params *slack.GetConversationRepliesParameters) ([]slack.Message, bool, string, error) {
+	return s.inner.GetConversationReplies(params)
 }
 
 // AuthTest tests the bot token.
@@ -137,6 +143,11 @@ func (a *App) AddReaction(name string, item slack.ItemRef) error {
 // RemoveReaction removes an emoji reaction from a message.
 func (a *App) RemoveReaction(name string, item slack.ItemRef) error {
 	return a.api.(*SafeSlackClient).RemoveReaction(name, item)
+}
+
+// GetConversationReplies reads thread messages.
+func (a *App) GetConversationReplies(params *slack.GetConversationRepliesParameters) ([]slack.Message, bool, string, error) {
+	return a.api.GetConversationReplies(params)
 }
 
 // Run starts the Socket Mode event loop. Blocks until context is cancelled.

@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -188,13 +189,21 @@ type WSClient struct {
 	cfg    WSConfig
 	logger zerolog.Logger
 
+	// Connection management
 	mu            sync.Mutex
 	conn          *websocket.Conn
-	connected     bool
+	connMu        sync.Mutex // protects conn during reconnect
+	connected     atomic.Bool
 	pending       map[string]chan wsFrame     // request ID → response channel
 	chatListeners map[string]chan chatEvent   // runID → chat event channel
 	stopCh        chan struct{}
 	done          chan struct{}
+	closed        atomic.Bool
+
+	// Reconnection state
+	reconnecting     atomic.Bool
+	stopReconnect    chan struct{}
+	maxReconnDelay   time.Duration // default 30s
 }
 
 // NewWSClient creates a new WebSocket client.
@@ -215,28 +224,31 @@ func NewWSClient(cfg WSConfig, logger zerolog.Logger) *WSClient {
 		cfg.Scopes = []string{"operator.admin"}
 	}
 
-	return &WSClient{
-		cfg:     cfg,
-		logger:  logger.With().Str("component", "ws-bridge").Logger(),
-		pending: make(map[string]chan wsFrame),
-		stopCh:  make(chan struct{}),
-		done:    make(chan struct{}),
+	ws := &WSClient{
+		cfg:           cfg,
+		logger:        logger.With().Str("component", "ws-bridge").Logger(),
+		pending:       make(map[string]chan wsFrame),
+		chatListeners: make(map[string]chan chatEvent),
+		stopCh:        make(chan struct{}),
+		done:          make(chan struct{}),
+		stopReconnect: make(chan struct{}),
+		maxReconnDelay: 30 * time.Second,
 	}
+	return ws
 }
 
 // Connect establishes the WebSocket connection and completes the handshake.
 func (c *WSClient) Connect(ctx context.Context) error {
-	return c.doConnect(ctx)
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	return c.connectInternal(ctx)
 }
 
-// doConnect is the internal connect implementation, used by both Connect and reconnectLoop.
-func (c *WSClient) doConnect(ctx context.Context) error {
-	c.mu.Lock()
-	if c.connected {
-		c.mu.Unlock()
+// connectInternal is the internal connect implementation (must be called with connMu held).
+func (c *WSClient) connectInternal(ctx context.Context) error {
+	if c.connected.Load() {
 		return nil
 	}
-	c.mu.Unlock()
 
 	c.logger.Info().Str("url", c.cfg.GatewayURL).Msg("connecting to gateway")
 
@@ -262,6 +274,7 @@ func (c *WSClient) doConnect(ctx context.Context) error {
 	// Start read loop
 	go c.readLoop()
 
+	c.connected.Store(true)
 	c.logger.Info().Msg("connected to gateway")
 	return nil
 }
@@ -383,7 +396,7 @@ func (c *WSClient) handleChallenge(ctx context.Context) error {
 		if resp.Type == "res" && resp.ID == reqID {
 			if resp.OK != nil && *resp.OK {
 				c.mu.Lock()
-				c.connected = true
+				c.connected.Store(true)
 				delete(c.pending, reqID)
 				c.mu.Unlock()
 				return nil
@@ -440,11 +453,84 @@ func (c *WSClient) buildDeviceAuth(nonce string, signedAtMs int64) (*connectDevi
 	}, nil
 }
 
+// scheduleReconnect schedules an automatic reconnection attempt.
+// It uses CAS to ensure only one reconnect goroutine is active at a time.
+func (c *WSClient) scheduleReconnect() {
+	if !c.reconnecting.CompareAndSwap(false, true) {
+		return // already reconnecting
+	}
+
+	c.connected.Store(false)
+
+	go func() {
+		defer c.reconnecting.Store(false)
+
+		baseDelay := c.cfg.ReconnectInterval
+		maxDelay := c.maxReconnDelay
+		if maxDelay == 0 {
+			maxDelay = 30 * time.Second
+		}
+
+		for attempt := 0; ; attempt++ {
+			// Exponential backoff: 1s, 2s, 4s, 8s, 16s, then cap at maxDelay
+			delay := baseDelay * time.Duration(1<<minInt(attempt, 4))
+			if delay > maxDelay {
+				delay = maxDelay
+			}
+
+			c.logger.Info().
+				Int("attempt", attempt+1).
+				Dur("delay", delay).
+				Msg("WS reconnecting...")
+
+			select {
+			case <-c.stopReconnect:
+				c.logger.Info().Msg("WS reconnect cancelled (shutdown)")
+				return
+			case <-time.After(delay):
+			}
+
+			// Try to reconnect
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			err := c.reconnect(ctx)
+			cancel()
+
+			if err == nil {
+				c.connected.Store(true)
+				c.logger.Info().Int("attempt", attempt+1).Msg("WS reconnected successfully")
+				return
+			}
+
+			c.logger.Warn().Err(err).Int("attempt", attempt+1).Msg("WS reconnect failed")
+		}
+	}()
+}
+
+// reconnect re-establishes the WebSocket connection.
+func (c *WSClient) reconnect(ctx context.Context) error {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+
+	// Close old connection if exists (ignore errors)
+	if c.conn != nil {
+		c.conn.Close()
+	}
+
+	return c.connectInternal(ctx)
+}
+
+// minInt returns the minimum of two integers.
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // readLoop reads messages from the WebSocket and dispatches responses.
 func (c *WSClient) readLoop() {
 	defer func() {
 		c.mu.Lock()
-		c.connected = false
 		// Fail all pending requests
 		for id, ch := range c.pending {
 			ch <- wsFrame{
@@ -461,8 +547,10 @@ func (c *WSClient) readLoop() {
 		}
 		c.mu.Unlock()
 
-		// Trigger auto-reconnect (non-blocking)
-		go c.reconnectLoop()
+		// Schedule auto-reconnect if not closed
+		if !c.closed.Load() {
+			c.scheduleReconnect()
+		}
 	}()
 
 	for {
@@ -472,10 +560,18 @@ func (c *WSClient) readLoop() {
 		default:
 		}
 
-		_, msg, err := c.conn.ReadMessage()
+		c.connMu.Lock()
+		conn := c.conn
+		c.connMu.Unlock()
+
+		if conn == nil {
+			return
+		}
+
+		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			if !errors.Is(err, websocket.ErrCloseSent) {
-				c.logger.Warn().Err(err).Msg("ws read error")
+				c.logger.Warn().Err(err).Msg("ws read error, scheduling reconnect")
 			}
 			return
 		}
@@ -520,12 +616,9 @@ func (c *WSClient) readLoop() {
 
 // SendAgent sends a message to the agent and waits for a response.
 func (c *WSClient) SendAgent(ctx context.Context, sessionID, message string) (*AgentResponse, error) {
-	c.mu.Lock()
-	if !c.connected || c.conn == nil {
-		c.mu.Unlock()
+	if !c.IsConnected() {
 		return nil, fmt.Errorf("not connected to gateway")
 	}
-	c.mu.Unlock()
 
 	timeout := c.cfg.DefaultTimeout
 	if deadline, ok := ctx.Deadline(); ok {
@@ -621,12 +714,9 @@ func (c *WSClient) SendAgent(ctx context.Context, sessionID, message string) (*A
 // SendChat sends a message via chat.send and streams the response via chat events.
 // Returns the final response text when the chat turn completes.
 func (c *WSClient) SendChat(ctx context.Context, sessionKey, message string) (string, error) {
-	c.mu.Lock()
-	if !c.connected || c.conn == nil {
-		c.mu.Unlock()
-		return "", fmt.Errorf("not connected to gateway")
+	if !c.IsConnected() {
+		return "", fmt.Errorf("not connected to gateway (reconnecting)")
 	}
-	c.mu.Unlock()
 
 	idempotencyKey := uuid.New().String()
 	params := chatSendParams{
@@ -770,12 +860,9 @@ func (c *WSClient) waitForChatFinal(ctx context.Context, sessionKey, runID strin
 
 // SendChatStream sends a message and calls onDelta for each streaming update.
 func (c *WSClient) SendChatStream(ctx context.Context, sessionKey, message string, onDelta StreamCallback) (string, error) {
-	c.mu.Lock()
-	if !c.connected || c.conn == nil {
-		c.mu.Unlock()
-		return "", fmt.Errorf("not connected to gateway")
+	if !c.IsConnected() {
+		return "", fmt.Errorf("not connected to gateway (reconnecting)")
 	}
-	c.mu.Unlock()
 
 	idempotencyKey := uuid.New().String()
 	params := chatSendParams{
@@ -823,72 +910,35 @@ func (c *WSClient) SendChatStream(ctx context.Context, sessionKey, message strin
 	}
 }
 
-// reconnectLoop attempts to reconnect with exponential backoff.
-func (c *WSClient) reconnectLoop() {
-	backoff := c.cfg.ReconnectInterval
-	for {
-		select {
-		case <-c.stopCh:
-			return
-		default:
-		}
-
-		c.logger.Info().Dur("backoff", backoff).Msg("reconnecting to gateway...")
-		time.Sleep(backoff)
-
-		select {
-		case <-c.stopCh:
-			return
-		default:
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-
-		// Reset done channel for new readLoop
-		c.mu.Lock()
-		c.done = make(chan struct{})
-		c.mu.Unlock()
-
-		err := c.doConnect(ctx)
-		cancel()
-
-		if err != nil {
-			c.logger.Warn().Err(err).Msg("reconnect failed")
-			backoff = time.Duration(float64(backoff) * 1.5)
-			if backoff > c.cfg.MaxReconnectInterval {
-				backoff = c.cfg.MaxReconnectInterval
-			}
-			continue
-		}
-
-		c.logger.Info().Msg("✅ reconnected to gateway")
-		return // readLoop will trigger reconnectLoop again if it drops
-	}
-}
-
 // Close gracefully shuts down the WebSocket connection.
 func (c *WSClient) Close() error {
+	c.closed.Store(true)
+
+	// Stop reconnect loop
+	select {
+	case <-c.stopReconnect:
+	default:
+		close(c.stopReconnect)
+	}
+
+	// Stop readLoop
 	close(c.stopCh)
 
-	c.mu.Lock()
-	conn := c.conn
-	c.connected = false
-	c.mu.Unlock()
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
 
-	if conn != nil {
+	if c.conn != nil {
 		// Send close frame
-		_ = conn.WriteMessage(
+		_ = c.conn.WriteMessage(
 			websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
 		)
-		return conn.Close()
+		return c.conn.Close()
 	}
 	return nil
 }
 
 // IsConnected returns true if the client is connected.
 func (c *WSClient) IsConnected() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.connected
+	return c.connected.Load()
 }

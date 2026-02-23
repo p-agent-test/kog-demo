@@ -26,6 +26,7 @@ import (
 // SlackAPI abstracts Slack posting for testing.
 type SlackAPI interface {
 	PostMessage(channelID string, options ...slack.MsgOption) (string, string, error)
+	GetConversationReplies(params *slack.GetConversationRepliesParameters) ([]slack.Message, bool, string, error)
 }
 
 // TaskRequeuer allows the agent to re-queue tasks after approval.
@@ -342,6 +343,8 @@ func (a *Agent) Execute(ctx context.Context, taskType string, params json.RawMes
 	// Slack tasks
 	case "slack.send-message":
 		result, err = a.executeSlackSendMessage(ctx, params)
+	case "slack.read-thread":
+		result, err = a.executeSlackReadThread(ctx, params)
 
 	// Policy tasks
 	case "policy.list":
@@ -934,6 +937,88 @@ func (a *Agent) executeSlackSendMessage(ctx context.Context, params json.RawMess
 		Action:   "slack.send-message",
 		Resource: p.ChannelID,
 		Result:   "completed",
+	})
+
+	return json.Marshal(result)
+}
+
+// SlackReadThreadParams are the params for slack.read-thread.
+type SlackReadThreadParams struct {
+	ChannelID string `json:"channel_id"`
+	ThreadTS  string `json:"thread_ts"`
+	Limit     int    `json:"limit"` // default 50, max 200
+}
+
+// SlackReadThreadResult is the result of slack.read-thread.
+type SlackReadThreadResult struct {
+	Messages []SlackThreadMessage `json:"messages"`
+	Count    int                  `json:"count"`
+	HasMore  bool                 `json:"has_more"`
+}
+
+// SlackThreadMessage is a simplified Slack message for thread reading.
+type SlackThreadMessage struct {
+	User      string `json:"user"`
+	Text      string `json:"text"`
+	Timestamp string `json:"timestamp"`
+	IsBot     bool   `json:"is_bot"`
+	BotID     string `json:"bot_id,omitempty"`
+}
+
+func (a *Agent) executeSlackReadThread(_ context.Context, params json.RawMessage) (json.RawMessage, error) {
+	var p SlackReadThreadParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if p.ChannelID == "" || p.ThreadTS == "" {
+		return nil, fmt.Errorf("channel_id and thread_ts are required")
+	}
+	if p.Limit <= 0 {
+		p.Limit = 50
+	}
+	if p.Limit > 200 {
+		p.Limit = 200
+	}
+
+	if a.slack == nil {
+		return nil, fmt.Errorf("Slack client is not configured")
+	}
+
+	// Read-only — no approval needed
+	msgs, hasMore, _, err := a.slack.GetConversationReplies(&slack.GetConversationRepliesParameters{
+		ChannelID: p.ChannelID,
+		Timestamp: p.ThreadTS,
+		Limit:     p.Limit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("reading thread: %w", err)
+	}
+
+	result := SlackReadThreadResult{
+		Messages: make([]SlackThreadMessage, 0, len(msgs)),
+		HasMore:  hasMore,
+	}
+
+	for _, m := range msgs {
+		msg := SlackThreadMessage{
+			User:      m.User,
+			Text:      m.Text,
+			Timestamp: m.Timestamp,
+			IsBot:     m.BotID != "",
+			BotID:     m.BotID,
+		}
+		if len(msg.Text) > 4000 {
+			msg.Text = msg.Text[:4000] + "... [truncated]"
+		}
+		result.Messages = append(result.Messages, msg)
+	}
+	result.Count = len(result.Messages)
+
+	a.audit.Record(models.AuditEntry{
+		Action:   "slack.read-thread",
+		Resource: p.ChannelID,
+		Result:   "completed",
+		Details:  fmt.Sprintf("thread=%s messages=%d", p.ThreadTS, result.Count),
 	})
 
 	return json.Marshal(result)

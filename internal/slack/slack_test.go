@@ -42,6 +42,10 @@ func (m *mockSlackAPI) AuthTest() (*slack.AuthTestResponse, error) {
 	return &slack.AuthTestResponse{UserID: "U123BOT"}, nil
 }
 
+func (m *mockSlackAPI) GetConversationReplies(_ *slack.GetConversationRepliesParameters) ([]slack.Message, bool, string, error) {
+	return nil, false, "", nil
+}
+
 func TestHandler_SendApprovalRequest(t *testing.T) {
 	logger := zerolog.Nop()
 	mw := NewMiddleware(logger, 10, time.Minute)

@@ -37,6 +37,10 @@ func (m *mockSlack) UpdateMessage(channelID, timestamp string, options ...slack.
 	return channelID, timestamp, "", nil
 }
 
+func (m *mockSlack) GetConversationReplies(params *slack.GetConversationRepliesParameters) ([]slack.Message, bool, string, error) {
+	return nil, false, "", nil
+}
+
 type mockGitOps struct {
 	called bool
 	err    error
