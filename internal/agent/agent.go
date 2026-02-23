@@ -47,7 +47,7 @@ type pendingApprovalInfo struct {
 // Agent is the task executor. It receives structured commands via the Management API
 // and executes them against the configured integrations.
 type Agent struct {
-	github     *ghclient.Client
+	github     *ghclient.MultiClient
 	gitops     GitOpsClient
 	jira       *jiraclient.Client
 	k8s        K8sClient
@@ -80,7 +80,7 @@ type Config struct {
 
 // NewAgent creates a new task executor agent.
 func NewAgent(
-	gh *ghclient.Client,
+	gh *ghclient.MultiClient,
 	jira *jiraclient.Client,
 	sup *supervisor.Supervisor,
 	slackAPI SlackAPI,
@@ -435,7 +435,11 @@ func (a *Agent) executeGitHubReviewPR(ctx context.Context, params json.RawMessag
 		return nil, fmt.Errorf("permission pending approval")
 	}
 
-	review, err := a.github.ReviewPR(ctx, p.Owner, p.Repo, p.PRNumber)
+	ghClient, err := a.github.ForOwner(p.Owner)
+	if err != nil {
+		return nil, fmt.Errorf("getting GitHub client for %s: %w", p.Owner, err)
+	}
+	review, err := ghClient.ReviewPR(ctx, p.Owner, p.Repo, p.PRNumber)
 	if err != nil {
 		return nil, fmt.Errorf("PR review failed: %w", err)
 	}

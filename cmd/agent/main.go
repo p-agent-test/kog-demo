@@ -79,28 +79,44 @@ func main() {
 	// Health checker
 	checker := health.NewChecker(logger)
 
-	// Initialize GitHub client (if configured)
-	var ghClient *ghclient.Client
+	// Initialize GitHub multi-org client (if configured)
+	var ghMulti *ghclient.MultiClient
 	if cfg.GitHubEnabled() {
-		var ghErr error
-		ghClient, ghErr = ghclient.NewClient(
-			cfg.GitHubAppID,
-			cfg.GitHubInstallationID,
-			cfg.GitHubPrivateKeyPath,
-			store,
-			logger,
-		)
-		if ghErr != nil {
-			logger.Warn().Err(ghErr).Msg("failed to init GitHub client (non-fatal)")
+		orgs, orgErr := cfg.ParseGitHubOrgs()
+		if orgErr != nil {
+			logger.Warn().Err(orgErr).Msg("failed to parse GitHub orgs (non-fatal)")
 		} else {
-			logger.Info().Msg("GitHub App client initialized")
-			checker.Register("github", func(ctx context.Context) health.Status {
-				_, err := ghClient.GetInstallationClient(ctx)
-				if err != nil {
-					return health.StatusDown
-				}
-				return health.StatusOK
-			})
+			// Convert config orgs to github orgs
+			ghOrgs := make([]ghclient.OrgInstallation, len(orgs))
+			for i, o := range orgs {
+				ghOrgs[i] = ghclient.OrgInstallation{Owner: o.Owner, InstallationID: o.InstallationID}
+			}
+			var ghErr error
+			ghMulti, ghErr = ghclient.NewMultiClient(
+				cfg.GitHubAppID,
+				cfg.GitHubPrivateKeyPath,
+				ghOrgs,
+				store,
+				logger,
+			)
+			if ghErr != nil {
+				logger.Warn().Err(ghErr).Msg("failed to init GitHub multi-client (non-fatal)")
+			} else {
+				logger.Info().
+					Strs("orgs", ghMulti.Owners()).
+					Msg("GitHub App multi-org client initialized")
+				checker.Register("github", func(ctx context.Context) health.Status {
+					defClient, err := ghMulti.Default()
+					if err != nil {
+						return health.StatusDown
+					}
+					_, err = defClient.GetInstallationClient(ctx)
+					if err != nil {
+						return health.StatusDown
+					}
+					return health.StatusOK
+				})
+			}
 		}
 	} else {
 		logger.Info().Msg("GitHub not configured — skipping")
@@ -131,7 +147,7 @@ func main() {
 	}
 
 	// Initialize Agent (the task executor)
-	agentInstance := agent.NewAgent(ghClient, jiraClient, sup, nil, audit, agent.Config{
+	agentInstance := agent.NewAgent(ghMulti, jiraClient, sup, nil, audit, agent.Config{
 		SupervisorChannel: cfg.SupervisorChannel,
 		JiraProjectKey:    "PLAT", // default; could be in config
 		DefaultNamespace:  "default",

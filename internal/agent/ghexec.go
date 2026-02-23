@@ -72,6 +72,9 @@ var operationClassification = map[string]commandClass{
 	"git.get-tree":      classRead,
 	"git.get-files":     classRead,
 
+	// Token operations
+	"repo.token": classWrite,
+
 	// Dangerous — always deny
 	"pr.merge":    classDangerous,
 	"pr.close":    classDangerous,
@@ -164,10 +167,16 @@ func (a *Agent) executeGHExec(ctx context.Context, params json.RawMessage) (json
 		a.logger.Debug().Str("operation", p.Operation).Msg("auto-approved read operation")
 	}
 
-	// Get GitHub client
-	client, err := a.github.GetInstallationClient(ctx)
+	// Extract owner from params to select correct org client
+	owner := extractOwner(p.Params)
+	if owner == "" {
+		owner = a.github.DefaultOwner()
+	}
+
+	// Get GitHub client for the owner's org
+	client, err := a.github.GetInstallationClient(ctx, owner)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get GitHub client: %w", err)
+		return nil, fmt.Errorf("failed to get GitHub client for %s: %w", owner, err)
 	}
 
 	// Dispatch to handler
@@ -249,6 +258,10 @@ func (a *Agent) dispatchGHOperation(ctx context.Context, client *gh.Client, op s
 		return a.ghGitGetTree(ctx, client, params)
 	case "git.get-files":
 		return a.ghGitGetFiles(ctx, client, params)
+
+	// Token operations
+	case "repo.token":
+		return a.ghRepoToken(ctx, params)
 
 	default:
 		return nil, fmt.Errorf("unimplemented operation: %s", op)
@@ -717,7 +730,82 @@ func (a *Agent) ghRunGet(ctx context.Context, client *gh.Client, params json.Raw
 	return run, nil
 }
 
+// --- Token handlers ---
+
+// ghRepoToken creates a scoped installation token for a single repo.
+// Requires approval (classWrite). Token is short-lived (1 hour), scoped to requested repo + permissions.
+func (a *Agent) ghRepoToken(_ context.Context, params json.RawMessage) (interface{}, error) {
+	var p struct {
+		Owner       string            `json:"owner"`
+		Repo        string            `json:"repo"`
+		Permissions map[string]string `json:"permissions"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if p.Owner == "" || p.Repo == "" {
+		return nil, fmt.Errorf("owner and repo are required")
+	}
+
+	// Default: read-only contents
+	if len(p.Permissions) == 0 {
+		p.Permissions = map[string]string{"contents": "read"}
+	}
+
+	// Validate permissions — only allow known safe ones
+	allowed := map[string]map[string]bool{
+		"contents":      {"read": true, "write": true},
+		"pull_requests": {"read": true, "write": true},
+		"issues":        {"read": true, "write": true},
+		"metadata":      {"read": true},
+	}
+	for perm, level := range p.Permissions {
+		levels, ok := allowed[perm]
+		if !ok {
+			return nil, fmt.Errorf("permission %q not allowed; allowed: contents, pull_requests, issues, metadata", perm)
+		}
+		if !levels[level] {
+			return nil, fmt.Errorf("level %q not allowed for %q", level, perm)
+		}
+	}
+
+	// Create scoped token via correct org's GitHub App installation
+	ctx := context.Background()
+	scopedToken, err := a.github.CreateScopedToken(ctx, p.Owner, p.Repo, p.Permissions)
+	if err != nil {
+		return nil, fmt.Errorf("creating scoped token: %w", err)
+	}
+
+	cloneURL := fmt.Sprintf("https://x-access-token:%s@github.com/%s/%s.git", scopedToken.Token, p.Owner, p.Repo)
+
+	return map[string]interface{}{
+		"token":       scopedToken.Token,
+		"expires_at":  scopedToken.ExpiresAt.Format("2006-01-02T15:04:05Z"),
+		"permissions": p.Permissions,
+		"repository":  fmt.Sprintf("%s/%s", p.Owner, p.Repo),
+		"clone_url":   cloneURL,
+	}, nil
+}
+
 // --- helpers ---
+
+// extractOwner pulls the "owner" (or "org") field from raw JSON params.
+func extractOwner(params json.RawMessage) string {
+	if len(params) == 0 {
+		return ""
+	}
+	var p struct {
+		Owner string `json:"owner"`
+		Org   string `json:"org"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return ""
+	}
+	if p.Owner != "" {
+		return p.Owner
+	}
+	return p.Org
+}
 
 func listAllowedOps() string {
 	var reads, writes []string

@@ -2,11 +2,18 @@ package config
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/kelseyhightower/envconfig"
 )
+
+// OrgInstallation pairs an org name with its GitHub App installation ID.
+type OrgInstallation struct {
+	Owner          string
+	InstallationID int64
+}
 
 // Config holds all application configuration loaded from environment variables.
 type Config struct {
@@ -27,6 +34,11 @@ type Config struct {
 	GitHubInstallationID int64  `envconfig:"GITHUB_INSTALLATION_ID"`
 	GitHubPrivateKeyPath string `envconfig:"GITHUB_PRIVATE_KEY_PATH"`
 	GitHubWebhookSecret  string `envconfig:"GITHUB_WEBHOOK_SECRET"`
+
+	// Multi-org: comma-separated "owner:installationID" pairs
+	// Example: "p-blackswan:111307878,p-backoffice:222408999"
+	// If set, overrides GitHubInstallationID. If not set, falls back to single-org mode.
+	GitHubOrgs string `envconfig:"GITHUB_ORGS"`
 
 	// Jira (optional — agent starts without Jira in mgmt-only mode)
 	JiraBaseURL      string `envconfig:"JIRA_BASE_URL"`
@@ -93,6 +105,50 @@ func (c *Config) SlackAllowedChannelList() []string {
 // GitHubEnabled returns true if GitHub App credentials are configured.
 func (c *Config) GitHubEnabled() bool {
 	return c.GitHubAppID > 0 && c.GitHubPrivateKeyPath != ""
+}
+
+// GitHubMultiOrg returns true if multi-org mode is configured.
+func (c *Config) GitHubMultiOrg() bool {
+	return c.GitHubOrgs != ""
+}
+
+// ParseGitHubOrgs parses GITHUB_ORGS env var into OrgInstallation list.
+// Format: "owner1:installationID1,owner2:installationID2"
+// Falls back to single-org (GitHubInstallationID) if GITHUB_ORGS is empty.
+func (c *Config) ParseGitHubOrgs() ([]OrgInstallation, error) {
+	if c.GitHubOrgs != "" {
+		return parseOrgInstallations(c.GitHubOrgs)
+	}
+	// Single-org fallback
+	if c.GitHubInstallationID > 0 {
+		return []OrgInstallation{{Owner: "default", InstallationID: c.GitHubInstallationID}}, nil
+	}
+	return nil, fmt.Errorf("no GitHub installations configured")
+}
+
+func parseOrgInstallations(raw string) ([]OrgInstallation, error) {
+	parts := strings.Split(raw, ",")
+	orgs := make([]OrgInstallation, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		tokens := strings.SplitN(part, ":", 2)
+		if len(tokens) != 2 {
+			return nil, fmt.Errorf("invalid org format %q, expected owner:installationID", part)
+		}
+		owner := strings.TrimSpace(tokens[0])
+		id, err := strconv.ParseInt(strings.TrimSpace(tokens[1]), 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid installation ID for %q: %w", owner, err)
+		}
+		orgs = append(orgs, OrgInstallation{Owner: owner, InstallationID: id})
+	}
+	if len(orgs) == 0 {
+		return nil, fmt.Errorf("GITHUB_ORGS is set but contains no valid entries")
+	}
+	return orgs, nil
 }
 
 // JiraEnabled returns true if Jira base URL is configured.
