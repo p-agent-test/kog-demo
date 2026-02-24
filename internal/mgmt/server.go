@@ -192,6 +192,11 @@ func (s *Server) Shutdown() error {
 	return s.app.Shutdown()
 }
 
+// V1Group returns the /api/v1 route group for registering additional routes.
+func (s *Server) V1Group() fiber.Router {
+	return s.app.Group("/api/v1")
+}
+
 // App returns the underlying Fiber app (useful for testing).
 func (s *Server) App() *fiber.App {
 	return s.app

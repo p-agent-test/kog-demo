@@ -22,6 +22,7 @@ import (
 	"github.com/p-blackswan/platform-agent/internal/health"
 	jiraclient "github.com/p-blackswan/platform-agent/internal/jira"
 	"github.com/p-blackswan/platform-agent/internal/mgmt"
+	"github.com/p-blackswan/platform-agent/internal/project"
 	slackpkg "github.com/p-blackswan/platform-agent/internal/slack"
 	datastore "github.com/p-blackswan/platform-agent/internal/store"
 	"github.com/p-blackswan/platform-agent/internal/supervisor"
@@ -267,6 +268,14 @@ func main() {
 	// Wire store to session context store
 	mgmtServer.SetSessionContextStore(dataStore)
 
+	// Initialize project subsystem
+	projectStore := project.NewStore(dataStore, logger)
+	projectManager := project.NewManager(projectStore, logger)
+
+	// Register project API routes
+	projectHandlers := mgmt.NewProjectHandlers(projectStore, projectManager, logger)
+	projectHandlers.RegisterRoutes(mgmtServer.V1Group())
+
 	// Start HTTP server
 	wg.Add(1)
 	go func() {
@@ -360,7 +369,19 @@ func main() {
 				logger.Info().Msg("📟 CLI bridge active (openclaw agent)")
 			}
 
-			slackHandler.SetForwarder(slackBridge)
+			// Wrap bridge with project router
+			var finalForwarder slackpkg.MessageForwarder
+			if safBridge, ok := slackBridge.(interface {
+				HandleMessageWithSession(ctx context.Context, channelID, userID, text, threadTS, messageTS, sessionKey string)
+				HandleMessage(ctx context.Context, channelID, userID, text, threadTS, messageTS string)
+				IsActiveThread(channelID, threadTS string) bool
+			}); ok {
+				projectRouter := project.NewRouter(projectStore, projectManager, safBridge, bridge.NewSlackPoster(slackApp), botUserID, logger)
+				finalForwarder = projectRouter
+			} else {
+				finalForwarder = slackBridge
+			}
+			slackHandler.SetForwarder(finalForwarder)
 
 			// Wire thread persistence from SQLite for restart recovery
 			if dataStore != nil {

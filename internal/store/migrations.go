@@ -5,7 +5,10 @@ import (
 )
 
 func (s *Store) migrate() error {
-	return s.migrateV1()
+	if err := s.migrateV1(); err != nil {
+		return err
+	}
+	return s.migrateV2()
 }
 
 func (s *Store) migrateV1() error {
@@ -96,6 +99,78 @@ func (s *Store) migrateV1() error {
 
 	if _, err := s.db.Exec(schema); err != nil {
 		return fmt.Errorf("failed to execute migration v1: %w", err)
+	}
+
+	return nil
+}
+
+func (s *Store) migrateV2() error {
+	// Check current version
+	var version string
+	err := s.db.QueryRow(`SELECT value FROM meta WHERE key = 'schema_version'`).Scan(&version)
+	if err != nil || version >= "2" {
+		return nil // already at v2+
+	}
+
+	schema := `
+	CREATE TABLE IF NOT EXISTS projects (
+		id              TEXT PRIMARY KEY,
+		slug            TEXT NOT NULL UNIQUE,
+		name            TEXT NOT NULL,
+		description     TEXT NOT NULL DEFAULT '',
+		repo_url        TEXT,
+		status          TEXT NOT NULL DEFAULT 'active',
+		owner_id        TEXT NOT NULL,
+		active_session  TEXT,
+		session_version INTEGER NOT NULL DEFAULT 1,
+		created_at      INTEGER NOT NULL,
+		updated_at      INTEGER NOT NULL,
+		archived_at     INTEGER
+	);
+
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_slug ON projects(slug);
+	CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status);
+	CREATE INDEX IF NOT EXISTS idx_projects_owner ON projects(owner_id);
+
+	CREATE TABLE IF NOT EXISTS project_memory (
+		id          TEXT PRIMARY KEY,
+		project_id  TEXT NOT NULL REFERENCES projects(id),
+		type        TEXT NOT NULL,
+		content     TEXT NOT NULL,
+		session_key TEXT,
+		created_at  INTEGER NOT NULL
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_pmem_project ON project_memory(project_id, created_at);
+
+	CREATE TABLE IF NOT EXISTS project_events (
+		id          TEXT PRIMARY KEY,
+		project_id  TEXT NOT NULL REFERENCES projects(id),
+		event_type  TEXT NOT NULL,
+		actor_id    TEXT NOT NULL,
+		summary     TEXT NOT NULL DEFAULT '',
+		metadata    TEXT,
+		created_at  INTEGER NOT NULL
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_pevt_project ON project_events(project_id, created_at);
+	`
+
+	if _, err := s.db.Exec(schema); err != nil {
+		return fmt.Errorf("failed to execute migration v2 (tables): %w", err)
+	}
+
+	// ALTER TABLE tasks ADD COLUMN project_id (ignore if already exists)
+	_, _ = s.db.Exec(`ALTER TABLE tasks ADD COLUMN project_id TEXT REFERENCES projects(id)`)
+	_, _ = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id)`)
+
+	// ALTER TABLE thread_sessions ADD COLUMN project_id (ignore if already exists)
+	_, _ = s.db.Exec(`ALTER TABLE thread_sessions ADD COLUMN project_id TEXT REFERENCES projects(id)`)
+	_, _ = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_thread_project ON thread_sessions(project_id)`)
+
+	// Update schema version
+	if _, err := s.db.Exec(`INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '2')`); err != nil {
+		return fmt.Errorf("failed to update schema version: %w", err)
 	}
 
 	return nil

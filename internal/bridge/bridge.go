@@ -184,11 +184,20 @@ func (b *Bridge) trackThread(channelID, threadTS string) {
 	}
 }
 
+// HandleMessageWithSession processes a message with an explicit session key (for project routing).
+func (b *Bridge) HandleMessageWithSession(ctx context.Context, channelID, userID, text, threadTS, messageTS, sessionKey string) {
+	b.handleMessageInternal(ctx, channelID, userID, text, threadTS, messageTS, sessionKey)
+}
+
 // HandleMessage processes an inbound Slack message and routes it to Kog-2.
 // This is meant to be called from the Slack event handler.
 // It runs asynchronously — the response is posted back to the Slack channel.
 // messageTS is the timestamp of the triggering message (for reactions).
 func (b *Bridge) HandleMessage(ctx context.Context, channelID, userID, text, threadTS, messageTS string) {
+	b.handleMessageInternal(ctx, channelID, userID, text, threadTS, messageTS, "")
+}
+
+func (b *Bridge) handleMessageInternal(ctx context.Context, channelID, userID, text, threadTS, messageTS, overrideSessionKey string) {
 	// Skip bot's own messages
 	if userID == b.cfg.BotUserID {
 		return
@@ -245,10 +254,10 @@ func (b *Bridge) HandleMessage(ctx context.Context, channelID, userID, text, thr
 		}
 
 		// Build session ID: each thread gets its own isolated session
-		// Thread messages → "slack-{channel}-{threadTS}" (isolated context)
-		// Top-level DMs  → "slack-{channel}" (shared channel session)
 		var sessionID string
-		if threadTS != "" {
+		if overrideSessionKey != "" {
+			sessionID = overrideSessionKey
+		} else if threadTS != "" {
 			sessionID = fmt.Sprintf("%s-%s-%s", b.cfg.SessionPrefix, channelID, threadTS)
 		} else {
 			sessionID = fmt.Sprintf("%s-%s", b.cfg.SessionPrefix, channelID)

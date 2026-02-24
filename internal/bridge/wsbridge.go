@@ -249,8 +249,17 @@ func (sm *streamingMessage) update(text string, isFinal bool) {
 	sm.lastUpdate = time.Now()
 }
 
+// HandleMessageWithSession processes a message with an explicit session key (for project routing).
+func (b *WSBridge) HandleMessageWithSession(ctx context.Context, channelID, userID, text, threadTS, messageTS, sessionKey string) {
+	b.handleMessageInternal(ctx, channelID, userID, text, threadTS, messageTS, sessionKey)
+}
+
 // HandleMessage processes an inbound Slack message via WebSocket + streaming.
 func (b *WSBridge) HandleMessage(ctx context.Context, channelID, userID, text, threadTS, messageTS string) {
+	b.handleMessageInternal(ctx, channelID, userID, text, threadTS, messageTS, "")
+}
+
+func (b *WSBridge) handleMessageInternal(ctx context.Context, channelID, userID, text, threadTS, messageTS, overrideSessionKey string) {
 	if userID == b.botUserID {
 		return
 	}
@@ -293,9 +302,12 @@ func (b *WSBridge) HandleMessage(ctx context.Context, channelID, userID, text, t
 			}()
 		}
 
-		sessionKey := fmt.Sprintf("agent:main:slack-%s", channelID)
-		if threadTS != "" {
-			sessionKey = fmt.Sprintf("agent:main:slack-%s-%s", channelID, threadTS)
+		sessionKey := overrideSessionKey
+		if sessionKey == "" {
+			sessionKey = fmt.Sprintf("agent:main:slack-%s", channelID)
+			if threadTS != "" {
+				sessionKey = fmt.Sprintf("agent:main:slack-%s-%s", channelID, threadTS)
+			}
 		}
 
 		contextMessage := fmt.Sprintf("[platform:slack user:<@%s> channel:%s thread:%s] %s",
