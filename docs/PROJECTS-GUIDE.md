@@ -13,12 +13,13 @@
 - `"İsim"` zorunlu, `--repo` opsiyonel
 - Otomatik slug üretir: `leader-election-refactor`
 - Session başlatır: `agent:main:project-leader-election-refactor`
+- ✨ Block Kit kartıyla onay + "Start Working" butonu
 
 ### Projeye Devam Et
 ```
 @kog leader-election-refactor
 ```
-Tek kelime yeter. Yeni thread açılır, proje context'i (kararlar, blocker'lar, son durum) inject edilir.
+Tek kelime yeter. Yeni thread açılır, proje context'i (kararlar, blocker'lar, son durum) Block Kit kartıyla gösterilir.
 
 ### Projeye Mesaj Gönder
 ```
@@ -27,12 +28,7 @@ Tek kelime yeter. Yeni thread açılır, proje context'i (kararlar, blocker'lar,
 Slug + mesaj → projenin session'ına route edilir, cevap aynı thread'de gelir.
 
 ### Thread İçinde (Slug Gereksiz)
-Proje thread'i açıldıktan sonra o thread'deki tüm mesajlar otomatik olarak projenin session'ına gider:
-```
-[leader-election-refactor thread'inde]
-Kullanıcı: etcd TLS sertifikaları hazır mı?
-Kog: [kontrol eder, cevaplar]
-```
+Proje thread'i açıldıktan sonra o thread'deki tüm mesajlar otomatik olarak projenin session'ına gider. `@kog` mention'a gerek yok.
 
 ---
 
@@ -40,33 +36,91 @@ Kog: [kontrol eder, cevaplar]
 
 | Komut | Açıklama |
 |-------|----------|
-| `@kog projects` veya `@kog projeler` | Aktif projeleri listele (dashboard) |
+| `@kog projects` veya `@kog projeler` | Dashboard (Block Kit kartları) |
 | `@kog new project "İsim"` | Yeni proje oluştur |
-| `@kog new project "İsim" --repo URL` | Repo bağlantılı proje oluştur |
-| `@kog <slug>` | Projeye devam et (yeni thread) |
+| `@kog new project "İsim" --repo URL` | Repo bağlantılı proje |
+| `@kog <slug>` | Projeye devam et (detay kartı + yeni thread) |
 | `@kog <slug> <mesaj>` | Projeye mesaj gönder |
 | `@kog decide <slug> <karar>` | Karar kaydet |
 | `@kog blocker <slug> <blocker>` | Blocker kaydet |
-| `@kog archive <slug>` | Projeyi arşivle |
-| `@kog resume <slug>` | Arşivlenmiş projeyi tekrar aç |
+| `@kog archive <slug>` | Arşivle |
+| `@kog resume <slug>` | Tekrar aç |
 
-### Dashboard Çıktısı
+---
+
+## Slack UX (Block Kit)
+
+### Dashboard (`@kog projects`)
+
+Rich Block Kit kartları — her proje ayrı section, butonlarla:
+
 ```
 📂 3 Active Projects
 
-🟢 leader-election — 2h ago
-├ 🚧 1 blocker · 📌 3 decisions · 12 tasks
-└ Last: "Implemented lease renewal, PR #47 open"
-
-🟡 ci-pipeline-v2 — 1d ago
-├ 📌 2 decisions · 8 tasks
-└ Last: "Migrated to GitHub Actions, testing"
-
-🔵 monitoring-revamp — 5d ago
-├ 📌 1 decision · 3 tasks
-└ Last: "Evaluated Grafana vs Datadog"
+🟢 leader-election
+Leader Election Refactor
+📌 3 decisions · 🚧 1 blocker · 12 tasks
+Last: 2h ago — "Implemented lease renewal, PR #47"
+[Continue]  [Archive]
+─────────────────────────────
+🟡 ci-pipeline-v2
+CI Pipeline Migration  
+📌 2 decisions · 8 tasks
+Last: 1d ago — "GitHub Actions testing"
+[Continue]  [Archive]
+─────────────────────────────
+🔵 monitoring-revamp
+Monitoring Revamp
+📌 1 decision · 3 tasks
+Last: 5d ago — "Evaluated Grafana vs Datadog"
+[Continue]  [Archive]
 ```
-Durum: 🟢 bugün aktif · 🟡 bu hafta · 🔵 >3 gün · ⏸️ durduruldu · 📦 arşiv
+
+**Durum emoji'leri** (son aktiviteye göre):
+- 🟢 < 6 saat
+- 🟡 < 3 gün
+- 🔵 < 7 gün
+- ⏸️ paused
+- 📦 archived
+
+### Proje Oluşturma Kartı
+```
+✅ Project Created: leader-election-refactor
+📋 Leader Election Refactor
+🔗 github.com/p-blackswan/infra-services
+[Start Working]
+```
+
+### Projeye Devam Kartı (`@kog <slug>`)
+```
+🔄 Leader Election Refactor — Resuming (v3)
+
+📌 Decisions:
+• Using etcd 3.5 with TLS
+• Lease TTL: 15s, renewal: 5s
+
+🚧 Blockers:
+• Waiting on SRE for TLS certs
+
+📝 Last Session:
+"Implemented lease renewal, PR #47 open for review"
+```
+
+### Karar/Blocker Kartı
+```
+📌 Decision recorded for leader-election
+"etcd 3.5 with TLS kullanılacak"
+Total: 4 decisions
+```
+
+### Butonlar (Interactive)
+
+Tüm butonlar gerçek Slack interaction callback'leri:
+- **Continue** → `project_continue_{slug}` → projeye devam flow'u başlatır
+- **Archive** → `project_archive_{slug}` → arşivler
+- **Start Working** → `project_start_{slug}` → ilk session'ı başlatır
+
+Butonlara tıklamak = komutu yazmakla aynı. Mobilden tek tap yeter.
 
 ---
 
@@ -74,9 +128,9 @@ Durum: 🟢 bugün aktif · 🟡 bu hafta · 🔵 >3 gün · ⏸️ durduruldu �
 
 Mesaj geldiğinde şu sırayla çözümlenir:
 
-1. **Thread binding** → Bu thread bir projeye bağlı mı? Bağlıysa o projeye route et
+1. **Thread binding** → Bu thread bir projeye bağlı mı? → projeye route et
 2. **Built-in komut** → `projects`, `new project`, `decide`, `blocker`, `archive`, `resume`
-3. **Slug match** → Kelime bir proje slug'ı mı? Projeye route et
+3. **Slug match** → Kelime bir proje slug'ı mı? → projeye route et
 4. **Default** → Mevcut davranış (thread-based session)
 
 **Reserved kelimeler** (slug olarak kullanılamaz): `projects`, `projeler`, `new`, `decide`, `blocker`, `archive`, `resume`, `help`, `handoff`
@@ -90,17 +144,18 @@ Her proje kendi hafızasına sahiptir. 4 tür:
 | Tür | Açıklama | Nasıl oluşur |
 |-----|----------|-------------|
 | `decision` | Proje kararları | `@kog decide <slug> ...` komutuyla |
-| `blocker` | Engeller, bekleyen işler | `@kog blocker <slug> ...` komutuyla |
-| `context_carry` | Session rotation özeti | Session token limiti aştığında otomatik |
-| `summary` | Periyodik durum özeti | Manuel veya otomatik |
+| `blocker` | Engeller | `@kog blocker <slug> ...` komutuyla |
+| `context_carry` | Session rotation özeti | Token limiti aşıldığında otomatik |
+| `summary` | Durum özeti | Manuel veya otomatik |
 
 ### Context Preamble
-Yeni session açıldığında (veya rotation sonrası) projenin hafızası otomatik olarak session'a inject edilir:
+
+Yeni session açıldığında projenin hafızası otomatik inject edilir:
 - Proje bilgileri (isim, repo, açıklama)
 - Son kararlar (max 20)
 - Aktif blocker'lar (max 10)
 - Son session özeti (context_carry, max 3)
-- Diğer aktif projelerin kısa indexi (cross-project awareness, ~500 token)
+- Diğer aktif projelerin kısa indexi (cross-project awareness)
 
 **Toplam preamble bütçesi: ~4000 token**
 
@@ -110,22 +165,40 @@ Yeni session açıldığında (veya rotation sonrası) projenin hafızası otoma
 
 ### Session Key Formatı
 ```
-agent:main:project-{slug}        # v1
+agent:main:project-{slug}        # ilk session
 agent:main:project-{slug}-v{N}   # rotation sonrası
 ```
 
-### Session Rotation
-Session token limitine ulaştığında:
-1. Kog'dan session özeti istenir
+### Session Rotation (Otomatik)
+
+Token limit hatasında (`context_length_exceeded`):
+1. Mevcut session'dan özet istenir
 2. Özet `context_carry` olarak kaydedilir
 3. Yeni session açılır (v+1)
 4. Context preamble inject edilir
-5. Proje kaldığı yerden devam eder
+5. Kullanıcıya bildirim: "Session rotated to v{N}"
+6. Mesaj yeni session'da retry edilir
+
+Detection: `bridge.IsTokenLimitError(err)` — WS bridge'de otomatik
+
+### Activity Tracking
+
+Her mesaj route edildiğinde `updated_at` güncellenir (`store.TouchProject`).
+Dashboard status emoji'leri bu timestamp'e göre hesaplanır.
 
 ### Restart Dayanıklılığı
-- Proje ve hafıza SQLite'da → restart'a dayanır
-- Thread binding'ler persist → thread'den devam edilebilir
-- OpenClaw session'ları server-side persistent
+- Projeler, hafıza, thread binding'ler → SQLite (persist)
+- OpenClaw session'ları → server-side persistent
+- Agent restart → projeler kaldığı yerden devam
+
+---
+
+## Task-Project Association
+
+Proje session'ı üzerinden oluşturulan task'lar otomatik olarak projeye bağlanır:
+- `task.project_id` → projenin UUID'si
+- Management API'dan: `POST /projects/:slug/message` → task oluşur, `project_id` set edilir
+- Slack'ten: thread binding üzerinden otomatik
 
 ---
 
@@ -133,53 +206,36 @@ Session token limitine ulaştığında:
 
 Base: `http://localhost:8090/api/v1/projects`
 
-### Endpoints
+| Method | Endpoint | Açıklama |
+|--------|----------|----------|
+| `POST` | `/` | Proje oluştur |
+| `GET` | `/` | Listele (`?status=active&owner_id=X`) |
+| `GET` | `/:slug` | Detay (memory + events + stats) |
+| `PATCH` | `/:slug` | Güncelle (name, description, repo_url) |
+| `POST` | `/:slug/message` | Session'a mesaj gönder |
+| `POST` | `/:slug/memory` | Hafıza ekle (decision/blocker/summary) |
+| `GET` | `/:slug/memory` | Hafıza listele (`?type=decision`) |
+| `GET` | `/:slug/events` | Event log |
+| `POST` | `/:slug/archive` | Arşivle |
+| `POST` | `/:slug/resume` | Tekrar aç |
+| `DELETE` | `/:slug` | Sil (cascade) |
 
-#### `POST /` — Proje oluştur
-```json
-{
-  "name": "Leader Election Refactor",
-  "description": "K8s Lease migration",
-  "repo_url": "https://github.com/p-blackswan/infra-services",
-  "owner_id": "U012YC9G6UW"
-}
+### Örnekler
+
+```bash
+# Proje oluştur
+curl -X POST http://localhost:8090/api/v1/projects \
+  -H "Content-Type: application/json" \
+  -d '{"name":"My Project","owner_id":"U012YC9G6UW"}'
+
+# Mesaj gönder
+curl -X POST http://localhost:8090/api/v1/projects/my-project/message \
+  -H "Content-Type: application/json" \
+  -d '{"message":"check CI status","caller_id":"U012YC9G6UW"}'
+
+# Kararları listele
+curl http://localhost:8090/api/v1/projects/my-project/memory?type=decision
 ```
-Response: 201 + Project object (id, slug, active_session, ...)
-
-#### `GET /` — Projeleri listele
-Query: `?status=active&owner_id=U012YC9G6UW&limit=20&offset=0`
-
-#### `GET /:slug` — Proje detayı
-Response: Project + recent_memory + recent_events + stats
-
-#### `PATCH /:slug` — Güncelle
-```json
-{ "name": "New Name", "description": "Updated desc" }
-```
-
-#### `POST /:slug/message` — Mesaj gönder
-```json
-{
-  "message": "PR #47'nin durumu ne?",
-  "caller_id": "U012YC9G6UW"
-}
-```
-Projenin OpenClaw session'ına mesaj gönderir. Response: task_id + status
-
-#### `POST /:slug/memory` — Hafıza ekle
-```json
-{ "type": "decision", "content": "etcd 3.5 with TLS kullanılacak" }
-```
-
-#### `GET /:slug/memory` — Hafıza listele
-Query: `?type=decision&limit=50`
-
-#### `GET /:slug/events` — Event log
-Query: `?limit=50&offset=0`
-
-#### `POST /:slug/archive` — Arşivle
-#### `POST /:slug/resume` — Tekrar aç
-#### `DELETE /:slug` — Sil (cascade: memory + events + thread bindings)
 
 ---
 
@@ -224,48 +280,37 @@ Query: `?limit=50&offset=0`
 
 ---
 
-## Örnekler
+## Tam Akış Örneği
 
-### Tam Akış
 ```
 # 1. Proje oluştur
 @kog new project "WS v2 Implementation" --repo github.com/p-blackswan/ws-hub
+→ ✅ Block Kit kartı + [Start Working] butonu
 
-# 2. Çalışmaya başla
+# 2. Butona tıkla veya yaz
 @kog ws-v2-implementation
-→ Yeni thread açılır, boş context ile başlar
+→ 🔄 Detay kartı (boş context) + yeni thread açılır
 
-# 3. Thread içinde çalış
+# 3. Thread içinde çalış (mention gereksiz)
 KrakenD endpoint'i oluştur, /v2/ws path'inde
 → Kog çalışır, cevap verir
 
 # 4. Karar kaydet
-@kog decide ws-v2-implementation seq number gap detection client-side olacak
+@kog decide ws-v2-implementation seq number gap detection client-side
+→ 📌 Block Kit onay kartı
 
-# 5. Ertesi gün devam et
+# 5. Ertesi gün — tek kelime
 @kog ws-v2-implementation
-→ Yeni thread, ama önceki kararlar ve context inject edilmiş
+→ 🔄 Kararlar + blocker'lar inject edilmiş yeni thread
 
-# 6. Dashboard'a bak
+# 6. Dashboard
 @kog projects
-→ Tüm projelerin durumu
+→ 📂 Rich kartlar + [Continue] [Archive] butonları
 
-# 7. Bitince arşivle
+# 7. Token limit aşıldı (otomatik)
+→ Session özeti alınır → v2 session açılır → devam
+
+# 8. Bitince
 @kog archive ws-v2-implementation
-```
-
-### API ile Programmatik Kullanım
-```bash
-# Proje oluştur
-curl -X POST http://localhost:8090/api/v1/projects \
-  -H "Content-Type: application/json" \
-  -d '{"name":"My Project","owner_id":"U012YC9G6UW"}'
-
-# Mesaj gönder
-curl -X POST http://localhost:8090/api/v1/projects/my-project/message \
-  -H "Content-Type: application/json" \
-  -d '{"message":"check CI status","caller_id":"U012YC9G6UW"}'
-
-# Kararları listele
-curl http://localhost:8090/api/v1/projects/my-project/memory?type=decision
+→ 📦 Arşivlendi
 ```
