@@ -34,6 +34,7 @@ type Task struct {
 	CallbackURL     string          `json:"callback_url,omitempty"`
 	ResponseChannel string          `json:"response_channel,omitempty"`
 	ResponseThread  string          `json:"response_thread,omitempty"`
+	ProjectID       string          `json:"project_id,omitempty"`
 	CreatedAt       time.Time       `json:"created_at"`
 	StartedAt       *time.Time      `json:"started_at,omitempty"`
 	CompletedAt     *time.Time      `json:"completed_at,omitempty"`
@@ -81,6 +82,7 @@ type SubmitTaskRequest struct {
 	CallbackURL     string          `json:"callback_url,omitempty"`
 	ResponseChannel string          `json:"response_channel,omitempty"`
 	ResponseThread  string          `json:"response_thread,omitempty"`
+	ProjectID       string          `json:"project_id,omitempty"`
 	TTLSeconds      int             `json:"ttl_seconds,omitempty"`
 }
 

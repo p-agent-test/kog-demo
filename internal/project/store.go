@@ -483,6 +483,16 @@ func (s *Store) GetProjectByThread(channel, threadTS string) (*Project, error) {
 	return s.GetProjectByID(projectID.String)
 }
 
+// TouchProject updates the project's updated_at timestamp to now.
+func (s *Store) TouchProject(slug string) error {
+	now := time.Now().UnixMilli()
+	_, err := s.ds.DB().Exec(`UPDATE projects SET updated_at = ? WHERE slug = ?`, now, slug)
+	if err != nil {
+		return fmt.Errorf("failed to touch project: %w", err)
+	}
+	return nil
+}
+
 // UpdateActiveSession updates the active session key and version for a project.
 func (s *Store) UpdateActiveSession(projectID, sessionKey string, version int) error {
 	now := time.Now().UnixMilli()

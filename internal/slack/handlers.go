@@ -22,6 +22,12 @@ type ApprovalHandler interface {
 	OnApproval(requestID, approverID string, approved bool)
 }
 
+// ProjectInteractionHandler processes project button callbacks.
+type ProjectInteractionHandler interface {
+	OnProjectContinue(channelID, threadTS, userID, slug string)
+	OnProjectArchive(channelID, threadTS, userID, slug string)
+}
+
 // Handler processes Slack events.
 // Interactive callbacks (approval buttons) are handled inline.
 // Regular messages are forwarded to Kog-2 via the MessageForwarder (bridge).
@@ -32,6 +38,7 @@ type Handler struct {
 	middleware      *Middleware
 	forwarder       MessageForwarder
 	approvalHandler ApprovalHandler
+	projectHandler  ProjectInteractionHandler
 }
 
 // NewHandler creates a new event handler.
@@ -50,6 +57,11 @@ func (h *Handler) SetForwarder(f MessageForwarder) {
 // SetApprovalHandler sets the handler for approval/denial callbacks.
 func (h *Handler) SetApprovalHandler(ah ApprovalHandler) {
 	h.approvalHandler = ah
+}
+
+// SetProjectHandler sets the handler for project button callbacks.
+func (h *Handler) SetProjectHandler(ph ProjectInteractionHandler) {
+	h.projectHandler = ph
 }
 
 // SetSocket sets the Socket Mode client for acknowledging events.
@@ -164,6 +176,21 @@ func (h *Handler) handleInteraction(ctx context.Context, evt socketmode.Event) {
 			h.handleApproval(ctx, callback, action, true)
 		case strings.HasPrefix(action.ActionID, "policy_deny_"):
 			h.handleApproval(ctx, callback, action, false)
+		case strings.HasPrefix(action.ActionID, "project_continue_"):
+			slug := strings.TrimPrefix(action.ActionID, "project_continue_")
+			if h.projectHandler != nil {
+				h.projectHandler.OnProjectContinue(callback.Channel.ID, callback.Message.Timestamp, callback.User.ID, slug)
+			}
+		case strings.HasPrefix(action.ActionID, "project_archive_"):
+			slug := strings.TrimPrefix(action.ActionID, "project_archive_")
+			if h.projectHandler != nil {
+				h.projectHandler.OnProjectArchive(callback.Channel.ID, callback.Message.Timestamp, callback.User.ID, slug)
+			}
+		case strings.HasPrefix(action.ActionID, "project_start_"):
+			slug := strings.TrimPrefix(action.ActionID, "project_start_")
+			if h.projectHandler != nil {
+				h.projectHandler.OnProjectContinue(callback.Channel.ID, callback.Message.Timestamp, callback.User.ID, slug)
+			}
 		}
 	}
 }

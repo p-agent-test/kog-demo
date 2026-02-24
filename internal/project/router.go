@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/rs/zerolog"
+	"github.com/slack-go/slack"
 )
 
 // MessageForwarder is the basic interface for forwarding messages.
@@ -23,6 +24,7 @@ type SessionAwareForwarder interface {
 // SlackResponder abstracts posting messages to Slack for the router.
 type SlackResponder interface {
 	PostMessage(channelID string, text string, threadTS string) (string, error)
+	PostBlocks(channelID string, threadTS string, fallbackText string, blocks ...slack.Block) (string, error)
 }
 
 // Router sits between Slack handlers and the bridge, resolving project routing.
@@ -58,6 +60,7 @@ func (r *Router) HandleMessage(ctx context.Context, channelID, userID, text, thr
 				r.respond(channelID, threadTS, messageTS, fmt.Sprintf("Project `%s` is archived. Run `resume %s` to reactivate.", proj.Slug, proj.Slug))
 				return
 			}
+			_ = r.store.TouchProject(proj.Slug)
 			r.bridge.HandleMessageWithSession(ctx, channelID, userID, text, threadTS, messageTS, proj.ActiveSession)
 			return
 		}
@@ -142,6 +145,17 @@ func (r *Router) respond(channelID, threadTS, messageTS, text string) {
 	_, _ = r.poster.PostMessage(channelID, text, replyThread)
 }
 
+func (r *Router) respondBlocks(channelID, threadTS, messageTS, fallback string, blocks ...slack.Block) {
+	if r.poster == nil {
+		return
+	}
+	replyThread := threadTS
+	if replyThread == "" {
+		replyThread = messageTS
+	}
+	_, _ = r.poster.PostBlocks(channelID, replyThread, fallback, blocks...)
+}
+
 func (r *Router) handleListProjects(channelID, userID, threadTS, messageTS string) {
 	projects, err := r.store.ListProjects("active", "")
 	if err != nil {
@@ -153,19 +167,19 @@ func (r *Router) handleListProjects(channelID, userID, threadTS, messageTS strin
 		return
 	}
 
-	var b strings.Builder
-	b.WriteString(fmt.Sprintf("📂 *%d Active Projects*\n\n", len(projects)))
+	statsMap := make(map[string]*ProjectStats)
+	eventsMap := make(map[string]*ProjectEvent)
 	for _, p := range projects {
 		stats, _ := r.store.GetProjectStats(p.ID)
-		icon := "🟢"
-		b.WriteString(fmt.Sprintf("%s **%s** — %s\n", icon, p.Slug, p.Name))
-		if stats != nil {
-			b.WriteString(fmt.Sprintf("├ 📌 %d decisions · 🚧 %d blockers · %d tasks\n", stats.Decisions, stats.Blockers, stats.Tasks))
+		statsMap[p.ID] = stats
+		events, _ := r.store.ListEvents(p.ID, 1)
+		if len(events) > 0 {
+			eventsMap[p.ID] = events[0]
 		}
-		b.WriteString("\n")
 	}
-	b.WriteString("`<slug>` to continue")
-	r.respond(channelID, threadTS, messageTS, b.String())
+
+	blocks := DashboardBlocks(projects, statsMap, eventsMap)
+	r.respondBlocks(channelID, threadTS, messageTS, fmt.Sprintf("📂 %d Active Projects", len(projects)), blocks...)
 }
 
 func (r *Router) handleNewProject(channelID, userID, threadTS, messageTS string, cmd *ProjectCommand) {
@@ -184,12 +198,8 @@ func (r *Router) handleNewProject(channelID, userID, threadTS, messageTS string,
 		return
 	}
 
-	msg := fmt.Sprintf("✅ Project created: `%s`\n📋 Name: %s", p.Slug, p.Name)
-	if p.RepoURL != "" {
-		msg += fmt.Sprintf("\n🔗 Repo: %s", p.RepoURL)
-	}
-	msg += fmt.Sprintf("\n\nStart working: `%s`", p.Slug)
-	r.respond(channelID, threadTS, messageTS, msg)
+	blocks := ProjectCreatedBlocks(p)
+	r.respondBlocks(channelID, threadTS, messageTS, fmt.Sprintf("✅ Project created: %s", p.Slug), blocks...)
 }
 
 func (r *Router) handleDecide(channelID, userID, threadTS, messageTS string, cmd *ProjectCommand) {
@@ -204,7 +214,13 @@ func (r *Router) handleDecide(channelID, userID, threadTS, messageTS string, cmd
 		Type:      "decision",
 		Content:   cmd.Message,
 	})
-	r.respond(channelID, threadTS, messageTS, fmt.Sprintf("📌 Decision recorded for `%s`: %s", proj.Slug, cmd.Message))
+	stats, _ := r.store.GetProjectStats(proj.ID)
+	total := 0
+	if stats != nil {
+		total = stats.Decisions
+	}
+	blocks := DecisionRecordedBlocks(proj.Slug, cmd.Message, total)
+	r.respondBlocks(channelID, threadTS, messageTS, fmt.Sprintf("📌 Decision recorded for %s", proj.Slug), blocks...)
 }
 
 func (r *Router) handleBlocker(channelID, userID, threadTS, messageTS string, cmd *ProjectCommand) {
@@ -219,7 +235,13 @@ func (r *Router) handleBlocker(channelID, userID, threadTS, messageTS string, cm
 		Type:      "blocker",
 		Content:   cmd.Message,
 	})
-	r.respond(channelID, threadTS, messageTS, fmt.Sprintf("🚧 Blocker recorded for `%s`: %s", proj.Slug, cmd.Message))
+	stats, _ := r.store.GetProjectStats(proj.ID)
+	total := 0
+	if stats != nil {
+		total = stats.Blockers
+	}
+	blocks := BlockerRecordedBlocks(proj.Slug, cmd.Message, total)
+	r.respondBlocks(channelID, threadTS, messageTS, fmt.Sprintf("🚧 Blocker recorded for %s", proj.Slug), blocks...)
 }
 
 func (r *Router) handleArchive(channelID, userID, threadTS, messageTS string, cmd *ProjectCommand) {
@@ -237,6 +259,30 @@ func (r *Router) handleResume(channelID, userID, threadTS, messageTS string, cmd
 		return
 	}
 	r.respond(channelID, threadTS, messageTS, fmt.Sprintf("▶️ Project `%s` resumed (session v%d).", p.Slug, p.SessionVersion))
+}
+
+// OnProjectContinue handles the "Continue" button callback from Slack.
+func (r *Router) OnProjectContinue(channelID, threadTS, userID, slug string) {
+	proj, _ := r.store.GetProject(slug)
+	if proj == nil {
+		r.respond(channelID, threadTS, "", fmt.Sprintf("Project `%s` not found.", slug))
+		return
+	}
+	if proj.Status == "archived" {
+		r.respond(channelID, threadTS, "", fmt.Sprintf("Project `%s` is archived. Run `resume %s` to reactivate.", slug, slug))
+		return
+	}
+	ctx := context.Background()
+	r.handleContinueProject(ctx, channelID, userID, threadTS, "", proj)
+}
+
+// OnProjectArchive handles the "Archive" button callback from Slack.
+func (r *Router) OnProjectArchive(channelID, threadTS, userID, slug string) {
+	if err := r.store.ArchiveProject(slug, userID); err != nil {
+		r.respond(channelID, threadTS, "", fmt.Sprintf("⚠️ %s", err.Error()))
+		return
+	}
+	r.respond(channelID, threadTS, "", fmt.Sprintf("📦 Project `%s` archived.", slug))
 }
 
 func (r *Router) handleContinueProject(ctx context.Context, channelID, userID, threadTS, messageTS string, proj *Project) {

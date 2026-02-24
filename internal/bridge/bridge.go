@@ -14,11 +14,13 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/slack-go/slack"
 )
 
 // SlackPoster abstracts posting messages to Slack.
 type SlackPoster interface {
 	PostMessage(channelID string, text string, threadTS string) (string, error)
+	PostBlocks(channelID string, threadTS string, fallbackText string, blocks ...slack.Block) (string, error)
 	UpdateMessage(channelID string, messageTS string, text string) error
 	AddReaction(channelID string, messageTS string, emoji string) error
 	RemoveReaction(channelID string, messageTS string, emoji string) error

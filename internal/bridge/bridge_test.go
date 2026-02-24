@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/slack-go/slack"
 )
 
 type mockPoster struct {
@@ -29,6 +30,9 @@ func (m *mockPoster) PostMessage(channelID, text, threadTS string) (string, erro
 	return "1234.5678", nil
 }
 
+func (m *mockPoster) PostBlocks(channelID, threadTS, fallbackText string, blocks ...slack.Block) (string, error) {
+	return "1234.5678", nil
+}
 func (m *mockPoster) UpdateMessage(_, _, _ string) error   { return nil }
 func (m *mockPoster) AddReaction(_, _, _ string) error    { return nil }
 func (m *mockPoster) RemoveReaction(_, _, _ string) error { return nil }

@@ -31,6 +31,18 @@ func (s *slackPosterAdapter) PostMessage(channelID, text, threadTS string) (stri
 	return ts, err
 }
 
+func (s *slackPosterAdapter) PostBlocks(channelID, threadTS, fallbackText string, blocks ...slack.Block) (string, error) {
+	opts := []slack.MsgOption{
+		slack.MsgOptionBlocks(blocks...),
+		slack.MsgOptionText(fallbackText, false),
+	}
+	if threadTS != "" {
+		opts = append(opts, slack.MsgOptionTS(threadTS))
+	}
+	_, ts, err := s.api.PostMessage(channelID, opts...)
+	return ts, err
+}
+
 func (s *slackPosterAdapter) UpdateMessage(channelID, messageTS, text string) error {
 	_, _, _, err := s.api.UpdateMessage(channelID, messageTS, slack.MsgOptionText(text, false))
 	return err

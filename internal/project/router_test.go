@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/rs/zerolog"
+	"github.com/slack-go/slack"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -54,16 +55,29 @@ func (m *mockBridge) IsActiveThread(channelID, threadTS string) bool {
 type mockPoster struct {
 	mu       sync.Mutex
 	messages []postedMsg
+	blocks   []postedBlockMsg
 }
 
 type postedMsg struct {
 	channel, text, thread string
 }
 
+type postedBlockMsg struct {
+	channel, thread, fallback string
+	blockCount               int
+}
+
 func (m *mockPoster) PostMessage(channelID, text, threadTS string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.messages = append(m.messages, postedMsg{channelID, text, threadTS})
+	return "msg-ts", nil
+}
+
+func (m *mockPoster) PostBlocks(channelID, threadTS, fallbackText string, blocks ...slack.Block) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.blocks = append(m.blocks, postedBlockMsg{channelID, threadTS, fallbackText, len(blocks)})
 	return "msg-ts", nil
 }
 
@@ -121,8 +135,9 @@ func TestRouter_ListProjects(t *testing.T) {
 
 	mp.mu.Lock()
 	defer mp.mu.Unlock()
-	require.Len(t, mp.messages, 1)
-	assert.Contains(t, mp.messages[0].text, "alpha")
+	require.Len(t, mp.blocks, 1)
+	assert.Contains(t, mp.blocks[0].fallback, "1 Active Projects")
+	assert.True(t, mp.blocks[0].blockCount > 0)
 }
 
 func TestRouter_ThreadBinding(t *testing.T) {
@@ -158,8 +173,8 @@ func TestRouter_NewProject(t *testing.T) {
 
 	mp.mu.Lock()
 	defer mp.mu.Unlock()
-	require.Len(t, mp.messages, 1)
-	assert.Contains(t, mp.messages[0].text, "test-proj")
+	require.Len(t, mp.blocks, 1)
+	assert.Contains(t, mp.blocks[0].fallback, "test-proj")
 
 	p, _ := s.GetProject("test-proj")
 	assert.NotNil(t, p)

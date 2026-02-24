@@ -20,6 +20,17 @@ type contextKey string
 // TaskIDContextKey is the context key for passing task ID to executors.
 const TaskIDContextKey contextKey = "task_id"
 
+// ProjectIDContextKey is the context key for passing project ID to executors.
+const ProjectIDContextKey contextKey = "project_id"
+
+// ProjectIDFromContext extracts the project ID from context.
+func ProjectIDFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(ProjectIDContextKey).(string); ok {
+		return v
+	}
+	return ""
+}
+
 // TaskIDFromContext extracts the task ID from context.
 func TaskIDFromContext(ctx context.Context) string {
 	if v, ok := ctx.Value(TaskIDContextKey).(string); ok {
@@ -135,6 +146,7 @@ func (te *TaskEngine) Submit(req SubmitTaskRequest) (*Task, error) {
 		CallbackURL:     req.CallbackURL,
 		ResponseChannel: req.ResponseChannel,
 		ResponseThread:  req.ResponseThread,
+		ProjectID:       req.ProjectID,
 		CreatedAt:       time.Now().UTC(),
 	}
 
@@ -434,6 +446,9 @@ func (te *TaskEngine) executeTask(ctx context.Context, task *Task, log zerolog.L
 	defer taskCancel()
 
 	taskCtx = context.WithValue(taskCtx, TaskIDContextKey, task.ID)
+	if task.ProjectID != "" {
+		taskCtx = context.WithValue(taskCtx, ProjectIDContextKey, task.ProjectID)
+	}
 	result, err := te.executor.Execute(taskCtx, task.Type, task.Params)
 	completed := time.Now().UTC()
 

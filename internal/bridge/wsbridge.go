@@ -12,6 +12,16 @@ import (
 
 const defaultSplitMaxLen = 3000
 
+// IsTokenLimitError checks if an error message indicates a context length / token limit error.
+func IsTokenLimitError(errMsg string) bool {
+	lower := strings.ToLower(errMsg)
+	return strings.Contains(lower, "context_length") ||
+		strings.Contains(lower, "token limit") ||
+		strings.Contains(lower, "maximum context length") ||
+		strings.Contains(lower, "context window") ||
+		strings.Contains(lower, "too many tokens")
+}
+
 // splitMessage splits a long message into chunks suitable for Slack posting.
 // It tries to split on markdown headers, code blocks, and paragraph breaks.
 func splitMessage(text string, maxLen int) []string {
