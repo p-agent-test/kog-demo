@@ -238,6 +238,15 @@ func (mg *mockGateway) handleChatSend(conn *websocket.Conn, req wsFrame) {
 	})
 }
 
+// helper to create a fast test config
+func testWSConfig(url string) WSConfig {
+	cfg := DefaultWSConfig()
+	cfg.GatewayURL = url
+	cfg.PingInterval = 100 * time.Millisecond
+	cfg.PongTimeout = 50 * time.Millisecond
+	return cfg
+}
+
 func TestWSClient_ConnectAndSend(t *testing.T) {
 	gw := newMockGateway(t, "test-token")
 	defer gw.close()
@@ -433,11 +442,14 @@ func TestWSClient_SendChatStream(t *testing.T) {
 
 	require.NoError(t, client.Connect(ctx))
 
+	var mu sync.Mutex
 	var deltaTexts []string
 	var finalText string
 	var finalCalled bool
 
 	callback := func(text string, isFinal bool) {
+		mu.Lock()
+		defer mu.Unlock()
 		if isFinal {
 			finalCalled = true
 			finalText = text
@@ -449,15 +461,16 @@ func TestWSClient_SendChatStream(t *testing.T) {
 	result, err := client.SendChatStream(ctx, "test-session", "test message", callback)
 	require.NoError(t, err)
 	assert.NotEmpty(t, result)
+
+	mu.Lock()
 	assert.True(t, finalCalled, "final callback should have been called")
 	assert.Equal(t, finalText, result)
+	mu.Unlock()
 
 	client.Close()
 }
 
 func TestWSClient_SendChatRaceCondition(t *testing.T) {
-	// This test verifies that the listener is registered before the response is sent
-	// If there's a race condition, the listener might miss delta/final events
 	gw := newMockGateway(t, "")
 	gw.chatFunc = func(conn *websocket.Conn, params chatSendParams) string {
 		return "Response for: " + params.Message
@@ -494,4 +507,252 @@ func TestWSClient_SendChatRaceCondition(t *testing.T) {
 	}
 
 	client.Close()
+}
+
+// --- New tests for bulletproof features ---
+
+func TestWSClient_PingPongKeepalive(t *testing.T) {
+	// Use a mock gateway that responds to pings (gorilla/websocket does this automatically)
+	gw := newMockGateway(t, "")
+	defer gw.close()
+
+	logger := zerolog.Nop()
+	cfg := testWSConfig(gw.url())
+
+	client := NewWSClient(cfg, logger)
+	ctx := context.Background()
+
+	require.NoError(t, client.Connect(ctx))
+	assert.True(t, client.IsConnected())
+
+	// Wait for a few ping cycles — connection should stay alive
+	time.Sleep(350 * time.Millisecond)
+	assert.True(t, client.IsConnected(), "connection should survive ping/pong cycles")
+
+	// Verify we can still send messages after pings
+	resp, err := client.SendAgent(ctx, "s1", "after-ping")
+	require.NoError(t, err)
+	assert.NotNil(t, resp)
+
+	client.Close()
+}
+
+func TestWSClient_ConcurrentWrites(t *testing.T) {
+	// This test verifies that concurrent writes don't cause a race condition
+	// Run with -race to detect
+	gw := newMockGateway(t, "")
+	gw.agentFunc = func(params agentParams) agentResult {
+		result := agentResult{RunID: "r1", Status: "ok"}
+		result.Result.Payloads = []struct {
+			Text     string  `json:"text"`
+			MediaURL *string `json:"mediaUrl"`
+		}{{Text: "ok"}}
+		return result
+	}
+	defer gw.close()
+
+	logger := zerolog.Nop()
+	cfg := testWSConfig(gw.url())
+
+	client := NewWSClient(cfg, logger)
+	ctx := context.Background()
+	require.NoError(t, client.Connect(ctx))
+
+	// Hammer concurrent writes while ping loop is also writing
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = client.SendAgent(ctx, "s", "msg")
+		}()
+	}
+	wg.Wait()
+
+	client.Close()
+}
+
+func TestWSClient_ReconnectPreservesListeners(t *testing.T) {
+	// Scenario: client sends chat.send, gets response + delta on conn1,
+	// conn1 dies, client reconnects, server sends final on conn2.
+	// The chat listener should survive the reconnect and receive the final.
+
+	runID := "run-preserved"
+	var gatewayMu sync.Mutex
+	connCount := 0
+	// Channel to signal server to send final on conn2
+	sendFinalCh := make(chan *websocket.Conn, 1)
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		gatewayMu.Lock()
+		connCount++
+		myConnNum := connCount
+		gatewayMu.Unlock()
+
+		// Send challenge
+		cp, _ := json.Marshal(challengePayload{Nonce: "n", TS: time.Now().UnixMilli()})
+		conn.WriteJSON(wsFrame{Type: "event", Event: "connect.challenge", Payload: cp})
+
+		for {
+			_, msg, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var frame wsFrame
+			if err := json.Unmarshal(msg, &frame); err != nil {
+				continue
+			}
+			if frame.Type != "req" {
+				continue
+			}
+
+			switch frame.Method {
+			case "connect":
+				ok := true
+				p, _ := json.Marshal(map[string]interface{}{"protocol": 3})
+				conn.WriteJSON(wsFrame{Type: "res", ID: frame.ID, OK: &ok, Payload: p})
+
+				if myConnNum == 2 {
+					// Second connection established — send final event for preserved listener
+					sendFinalCh <- conn
+				}
+
+			case "chat.send":
+				ok := true
+				p, _ := json.Marshal(chatSendResult{RunID: runID, Status: "accepted"})
+				conn.WriteJSON(wsFrame{Type: "res", ID: frame.ID, OK: &ok, Payload: p})
+
+				// First connection: send delta then close
+				de := chatEvent{RunID: runID, State: "delta", Message: &chatMessage{
+					Role:    "assistant",
+					Content: []chatContent{{Type: "text", Text: "partial..."}},
+				}}
+				dp, _ := json.Marshal(de)
+				conn.WriteJSON(wsFrame{Type: "event", Event: "chat", Payload: dp})
+				time.Sleep(20 * time.Millisecond)
+				conn.Close()
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	// Goroutine to send final on second connection
+	go func() {
+		conn := <-sendFinalCh
+		time.Sleep(50 * time.Millisecond) // let readLoop start
+		fe := chatEvent{RunID: runID, State: "final", Message: &chatMessage{
+			Role:    "assistant",
+			Content: []chatContent{{Type: "text", Text: "final after reconnect"}},
+		}}
+		fp, _ := json.Marshal(fe)
+		conn.WriteJSON(wsFrame{Type: "event", Event: "chat", Payload: fp})
+	}()
+
+	logger := zerolog.Nop()
+	cfg := DefaultWSConfig()
+	cfg.GatewayURL = "ws" + strings.TrimPrefix(server.URL, "http")
+	cfg.ReconnectInterval = 50 * time.Millisecond
+	cfg.PingInterval = 5 * time.Second
+	cfg.PongTimeout = 5 * time.Second
+
+	client := NewWSClient(cfg, logger)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	require.NoError(t, client.Connect(ctx))
+
+	result, err := client.SendChat(ctx, "sess", "test")
+	require.NoError(t, err)
+	assert.Equal(t, "final after reconnect", result)
+
+	client.Close()
+}
+
+func TestWSClient_ChatListenerPreRegistration(t *testing.T) {
+	// Test that events arriving immediately after response don't get dropped
+	// The mock gateway sends events RIGHT AFTER the chat.send response (no delay)
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		cp, _ := json.Marshal(challengePayload{Nonce: "n", TS: time.Now().UnixMilli()})
+		conn.WriteJSON(wsFrame{Type: "event", Event: "connect.challenge", Payload: cp})
+
+		for {
+			_, msg, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var frame wsFrame
+			json.Unmarshal(msg, &frame)
+			if frame.Type != "req" {
+				continue
+			}
+
+			switch frame.Method {
+			case "connect":
+				ok := true
+				p, _ := json.Marshal(map[string]interface{}{"protocol": 3})
+				conn.WriteJSON(wsFrame{Type: "res", ID: frame.ID, OK: &ok, Payload: p})
+
+			case "chat.send":
+				runID := "fast-run"
+				ok := true
+				p, _ := json.Marshal(chatSendResult{RunID: runID, Status: "accepted"})
+				// Send response, then IMMEDIATELY send events (no sleep)
+				conn.WriteJSON(wsFrame{Type: "res", ID: frame.ID, OK: &ok, Payload: p})
+
+				fe := chatEvent{RunID: runID, State: "final", Message: &chatMessage{
+					Role:    "assistant",
+					Content: []chatContent{{Type: "text", Text: "instant response"}},
+				}}
+				fp, _ := json.Marshal(fe)
+				conn.WriteJSON(wsFrame{Type: "event", Event: "chat", Payload: fp})
+			}
+		}
+	}))
+	defer server.Close()
+
+	logger := zerolog.Nop()
+	cfg := DefaultWSConfig()
+	cfg.GatewayURL = "ws" + strings.TrimPrefix(server.URL, "http")
+	cfg.PingInterval = 5 * time.Second
+	cfg.PongTimeout = 5 * time.Second
+
+	// Run multiple times to increase chance of hitting the race
+	for i := 0; i < 10; i++ {
+		client := NewWSClient(cfg, logger)
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+
+		require.NoError(t, client.Connect(ctx))
+
+		result, err := client.SendChat(ctx, "sess", "fast")
+		assert.NoError(t, err, "iteration %d", i)
+		assert.Equal(t, "instant response", result, "iteration %d", i)
+
+		client.Close()
+		cancel()
+	}
+}
+
+func TestWSClient_DefaultTimeouts(t *testing.T) {
+	cfg := DefaultWSConfig()
+	assert.Equal(t, 300*time.Second, cfg.DefaultTimeout)
+	assert.Equal(t, 10*time.Minute, cfg.ChatTimeout)
+	assert.Equal(t, 30*time.Second, cfg.PingInterval)
+	assert.Equal(t, 10*time.Second, cfg.PongTimeout)
 }

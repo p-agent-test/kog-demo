@@ -48,14 +48,23 @@ type WSConfig struct {
 	// Default: ["operator.admin", "operator.write", "operator.read"]
 	Scopes []string
 
-	// AgentTimeout is the max wait for an agent response.
+	// DefaultTimeout is the max wait for a generic request response.
 	DefaultTimeout time.Duration
+
+	// ChatTimeout is the max wait for chat (LLM) responses. Default: 10 min.
+	ChatTimeout time.Duration
 
 	// ReconnectInterval is the delay between reconnection attempts.
 	ReconnectInterval time.Duration
 
 	// MaxReconnectInterval caps the exponential backoff.
 	MaxReconnectInterval time.Duration
+
+	// PingInterval is how often to send WebSocket pings. Default: 30s.
+	PingInterval time.Duration
+
+	// PongTimeout is how long to wait for a pong after ping. Default: 10s.
+	PongTimeout time.Duration
 }
 
 // DefaultWSConfig returns sane defaults.
@@ -64,9 +73,12 @@ func DefaultWSConfig() WSConfig {
 		GatewayURL:           "ws://localhost:18789/ws/gateway",
 		ClientID:             "gateway-client",
 		Scopes:               []string{"operator.admin"},
-		DefaultTimeout:       120 * time.Second,
+		DefaultTimeout:       300 * time.Second,
+		ChatTimeout:          10 * time.Minute,
 		ReconnectInterval:    1 * time.Second,
 		MaxReconnectInterval: 30 * time.Second,
+		PingInterval:         30 * time.Second,
+		PongTimeout:          10 * time.Second,
 	}
 }
 
@@ -190,12 +202,14 @@ type WSClient struct {
 	logger zerolog.Logger
 
 	// Connection management
-	mu            sync.Mutex
+	mu            sync.Mutex                 // protects pending, chatListeners maps
+	writeMu       sync.Mutex                 // protects ALL websocket writes
 	conn          *websocket.Conn
-	connMu        sync.Mutex // protects conn during reconnect
+	connMu        sync.Mutex                 // protects conn during reconnect
 	connected     atomic.Bool
 	pending       map[string]chan wsFrame     // request ID → response channel
 	chatListeners map[string]chan chatEvent   // runID → chat event channel
+	chatPreReg    map[string]chan chatEvent   // reqID → eventCh (pre-registered before chat.send response)
 	stopCh        chan struct{}
 	done          chan struct{}
 	closed        atomic.Bool
@@ -204,6 +218,13 @@ type WSClient struct {
 	reconnecting     atomic.Bool
 	stopReconnect    chan struct{}
 	maxReconnDelay   time.Duration // default 30s
+
+	// Ping/pong keepalive
+	pingStop chan struct{} // closed to stop ping loop
+
+	// Health tracking
+	connectedAt   time.Time     // when current connection was established
+	disconnectedAt time.Time    // when last disconnect happened
 }
 
 // NewWSClient creates a new WebSocket client.
@@ -212,7 +233,10 @@ func NewWSClient(cfg WSConfig, logger zerolog.Logger) *WSClient {
 		cfg.ClientID = "gateway-client"
 	}
 	if cfg.DefaultTimeout == 0 {
-		cfg.DefaultTimeout = 120 * time.Second
+		cfg.DefaultTimeout = 300 * time.Second
+	}
+	if cfg.ChatTimeout == 0 {
+		cfg.ChatTimeout = 10 * time.Minute
 	}
 	if cfg.ReconnectInterval == 0 {
 		cfg.ReconnectInterval = 1 * time.Second
@@ -223,12 +247,19 @@ func NewWSClient(cfg WSConfig, logger zerolog.Logger) *WSClient {
 	if len(cfg.Scopes) == 0 {
 		cfg.Scopes = []string{"operator.admin"}
 	}
+	if cfg.PingInterval == 0 {
+		cfg.PingInterval = 30 * time.Second
+	}
+	if cfg.PongTimeout == 0 {
+		cfg.PongTimeout = 10 * time.Second
+	}
 
 	ws := &WSClient{
 		cfg:           cfg,
 		logger:        logger.With().Str("component", "ws-bridge").Logger(),
 		pending:       make(map[string]chan wsFrame),
 		chatListeners: make(map[string]chan chatEvent),
+		chatPreReg:    make(map[string]chan chatEvent),
 		stopCh:        make(chan struct{}),
 		done:          make(chan struct{}),
 		stopReconnect: make(chan struct{}),
@@ -271,12 +302,76 @@ func (c *WSClient) connectInternal(ctx context.Context) error {
 		return fmt.Errorf("challenge handshake failed: %w", err)
 	}
 
+	// Set up pong handler — extends read deadline on pong receipt
+	conn.SetPongHandler(func(appData string) error {
+		conn.SetReadDeadline(time.Now().Add(c.cfg.PingInterval + c.cfg.PongTimeout))
+		return nil
+	})
+
+	// Set initial read deadline
+	conn.SetReadDeadline(time.Now().Add(c.cfg.PingInterval + c.cfg.PongTimeout))
+
 	// Start read loop
 	go c.readLoop()
 
+	// Start ping loop
+	pingStop := make(chan struct{})
+	c.mu.Lock()
+	c.pingStop = pingStop
+	c.mu.Unlock()
+	go c.pingLoop(pingStop)
+
 	c.connected.Store(true)
-	c.logger.Info().Msg("connected to gateway")
+	c.connectedAt = time.Now()
+
+	// Log reconnect recovery
+	if !c.disconnectedAt.IsZero() {
+		downtime := time.Since(c.disconnectedAt)
+		c.mu.Lock()
+		listenerCount := len(c.chatListeners)
+		c.mu.Unlock()
+		c.logger.Info().
+			Dur("downtime", downtime).
+			Int("preserved_listeners", listenerCount).
+			Msg("reconnected to gateway")
+		if listenerCount > 0 {
+			c.logger.Info().Int("count", listenerCount).Msg("in-flight chat listeners survived reconnect")
+		}
+	} else {
+		c.logger.Info().Msg("connected to gateway")
+	}
+
 	return nil
+}
+
+// pingLoop sends WebSocket pings at regular intervals.
+func (c *WSClient) pingLoop(stop chan struct{}) {
+	ticker := time.NewTicker(c.cfg.PingInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-stop:
+			return
+		case <-c.stopCh:
+			return
+		case <-ticker.C:
+			c.writeMu.Lock()
+			c.connMu.Lock()
+			conn := c.conn
+			c.connMu.Unlock()
+			if conn == nil {
+				c.writeMu.Unlock()
+				return
+			}
+			err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second))
+			c.writeMu.Unlock()
+			if err != nil {
+				c.logger.Warn().Err(err).Msg("ping write failed")
+				return
+			}
+		}
+	}
 }
 
 // handleChallenge reads the challenge event and sends the connect request.
@@ -361,7 +456,11 @@ func (c *WSClient) handleChallenge(ctx context.Context) error {
 	c.mu.Unlock()
 
 	reqBytes, _ := json.Marshal(req)
-	if err := c.conn.WriteMessage(websocket.TextMessage, reqBytes); err != nil {
+	// During handshake, no concurrent writers yet, but use writeMu for consistency
+	c.writeMu.Lock()
+	err = c.conn.WriteMessage(websocket.TextMessage, reqBytes)
+	c.writeMu.Unlock()
+	if err != nil {
 		return fmt.Errorf("sending connect: %w", err)
 	}
 
@@ -461,6 +560,7 @@ func (c *WSClient) scheduleReconnect() {
 	}
 
 	c.connected.Store(false)
+	c.disconnectedAt = time.Now()
 
 	go func() {
 		defer c.reconnecting.Store(false)
@@ -530,8 +630,25 @@ func minInt(a, b int) int {
 // readLoop reads messages from the WebSocket and dispatches responses.
 func (c *WSClient) readLoop() {
 	defer func() {
+		// Stop ping loop for this connection
 		c.mu.Lock()
-		// Fail all pending requests
+		if c.pingStop != nil {
+			select {
+			case <-c.pingStop:
+			default:
+				close(c.pingStop)
+			}
+		}
+		c.mu.Unlock()
+
+		// Log connection uptime
+		if !c.connectedAt.IsZero() {
+			uptime := time.Since(c.connectedAt)
+			c.logger.Info().Dur("uptime", uptime).Msg("connection ended")
+		}
+
+		c.mu.Lock()
+		// Fail all pending requests (they can't survive reconnect — they need the response on this conn)
 		for id, ch := range c.pending {
 			ch <- wsFrame{
 				Type:  "res",
@@ -540,10 +657,14 @@ func (c *WSClient) readLoop() {
 			}
 			delete(c.pending, id)
 		}
-		// Fail all chat listeners
-		for id, ch := range c.chatListeners {
-			ch <- chatEvent{State: "error", Error: "connection lost"}
-			delete(c.chatListeners, id)
+
+		// Only close chat listeners on permanent shutdown.
+		// On reconnect, keep them alive — the new readLoop will deliver events to them.
+		if c.closed.Load() {
+			for id, ch := range c.chatListeners {
+				ch <- chatEvent{State: "error", Error: "connection closed permanently"}
+				delete(c.chatListeners, id)
+			}
 		}
 		c.mu.Unlock()
 
@@ -589,6 +710,17 @@ func (c *WSClient) readLoop() {
 			if ok {
 				delete(c.pending, frame.ID)
 			}
+			// Auto-register chat listener from pre-reg map when chat.send response arrives
+			if preRegCh, hasPreReg := c.chatPreReg[frame.ID]; hasPreReg {
+				delete(c.chatPreReg, frame.ID)
+				// Parse runID from response payload and register listener
+				if frame.OK != nil && *frame.OK {
+					var chatResp chatSendResult
+					if json.Unmarshal(frame.Payload, &chatResp) == nil && chatResp.RunID != "" {
+						c.chatListeners[chatResp.RunID] = preRegCh
+					}
+				}
+			}
 			c.mu.Unlock()
 			if ok {
 				ch <- frame
@@ -598,6 +730,7 @@ func (c *WSClient) readLoop() {
 				var evt chatEvent
 				if err := json.Unmarshal(frame.Payload, &evt); err == nil {
 					c.mu.Lock()
+					// Try runID first, then check all listeners (for pre-registered by reqID)
 					ch, ok := c.chatListeners[evt.RunID]
 					c.mu.Unlock()
 					if ok {
@@ -614,6 +747,19 @@ func (c *WSClient) readLoop() {
 			c.logger.Trace().Str("event", frame.Event).Msg("event received")
 		}
 	}
+}
+
+// writeMessage writes a message to the WebSocket connection with proper locking.
+func (c *WSClient) writeMessage(msgType int, data []byte) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	c.connMu.Lock()
+	conn := c.conn
+	c.connMu.Unlock()
+	if conn == nil {
+		return fmt.Errorf("no connection")
+	}
+	return conn.WriteMessage(msgType, data)
 }
 
 // SendAgent sends a message to the agent and waits for a response.
@@ -653,11 +799,7 @@ func (c *WSClient) SendAgent(ctx context.Context, sessionID, message string) (*A
 
 	reqBytes, _ := json.Marshal(req)
 
-	c.mu.Lock()
-	err = c.conn.WriteMessage(websocket.TextMessage, reqBytes)
-	c.mu.Unlock()
-
-	if err != nil {
+	if err := c.writeMessage(websocket.TextMessage, reqBytes); err != nil {
 		c.mu.Lock()
 		delete(c.pending, reqID)
 		c.mu.Unlock()
@@ -720,6 +862,13 @@ func (c *WSClient) SendChat(ctx context.Context, sessionKey, message string) (st
 		return "", fmt.Errorf("not connected to gateway (reconnecting)")
 	}
 
+	// Use ChatTimeout if no deadline set
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.cfg.ChatTimeout)
+		defer cancel()
+	}
+
 	idempotencyKey := uuid.New().String()
 	params := chatSendParams{
 		SessionKey:     sessionKey,
@@ -741,20 +890,21 @@ func (c *WSClient) SendChat(ctx context.Context, sessionKey, message string) (st
 		Params: paramsJSON,
 	}
 
-	// Register for response
+	// Pre-register chat listener keyed by reqID — readLoop will auto-register by runID
+	// when the chat.send response arrives, before any chat events can be processed.
+	eventCh := make(chan chatEvent, 32)
+
 	respCh := make(chan wsFrame, 1)
 	c.mu.Lock()
 	c.pending[reqID] = respCh
+	c.chatPreReg[reqID] = eventCh
 	c.mu.Unlock()
 
 	reqBytes, _ := json.Marshal(req)
-	c.mu.Lock()
-	err = c.conn.WriteMessage(websocket.TextMessage, reqBytes)
-	c.mu.Unlock()
-
-	if err != nil {
+	if err := c.writeMessage(websocket.TextMessage, reqBytes); err != nil {
 		c.mu.Lock()
 		delete(c.pending, reqID)
+		delete(c.chatPreReg, reqID)
 		c.mu.Unlock()
 		return "", fmt.Errorf("sending chat.send: %w", err)
 	}
@@ -768,6 +918,9 @@ func (c *WSClient) SendChat(ctx context.Context, sessionKey, message string) (st
 	select {
 	case resp := <-respCh:
 		if resp.Error != nil {
+			c.mu.Lock()
+			delete(c.chatPreReg, reqID)
+			c.mu.Unlock()
 			return "", fmt.Errorf("chat.send error: %s", resp.Error.Message)
 		}
 		var chatResp chatSendResult
@@ -776,12 +929,13 @@ func (c *WSClient) SendChat(ctx context.Context, sessionKey, message string) (st
 		}
 		c.logger.Debug().Str("runId", chatResp.RunID).Msg("chat.send accepted")
 
-		// Now wait for the final chat event with this runId
-		return c.waitForChatFinal(ctx, chatResp.RunID)
+		// Listener already registered by readLoop via chatPreReg
+		return c.waitForChatFinalWithCh(ctx, chatResp.RunID, eventCh)
 
 	case <-ctx.Done():
 		c.mu.Lock()
 		delete(c.pending, reqID)
+		delete(c.chatPreReg, reqID)
 		c.mu.Unlock()
 		return "", ctx.Err()
 	}
@@ -791,8 +945,8 @@ func (c *WSClient) SendChat(ctx context.Context, sessionKey, message string) (st
 // deltaText is the cumulative text so far. isFinal indicates the last call.
 type StreamCallback func(deltaText string, isFinal bool)
 
-// waitForChatFinal waits for chat events on the provided eventCh and optionally calls onDelta for streaming.
-// The listener must be pre-registered by the caller before calling this method.
+// waitForChatFinal waits for chat events and optionally calls onDelta for streaming.
+// DEPRECATED: use waitForChatFinalWithCh with pre-registered channel.
 func (c *WSClient) waitForChatFinal(ctx context.Context, runID string, onDelta ...StreamCallback) (string, error) {
 	eventCh := make(chan chatEvent, 32)
 
@@ -803,16 +957,31 @@ func (c *WSClient) waitForChatFinal(ctx context.Context, runID string, onDelta .
 	c.chatListeners[runID] = eventCh
 	c.mu.Unlock()
 
+	var cb StreamCallback
+	if len(onDelta) > 0 {
+		cb = onDelta[0]
+	}
+
+	return c.consumeChatEvents(ctx, runID, eventCh, cb)
+}
+
+// waitForChatFinalWithCh waits for chat events on a pre-registered channel.
+func (c *WSClient) waitForChatFinalWithCh(ctx context.Context, runID string, eventCh chan chatEvent, onDelta ...StreamCallback) (string, error) {
+	var cb StreamCallback
+	if len(onDelta) > 0 {
+		cb = onDelta[0]
+	}
+
+	return c.consumeChatEvents(ctx, runID, eventCh, cb)
+}
+
+// consumeChatEvents processes events from a chat event channel until final/error/abort.
+func (c *WSClient) consumeChatEvents(ctx context.Context, runID string, eventCh chan chatEvent, cb StreamCallback) (string, error) {
 	defer func() {
 		c.mu.Lock()
 		delete(c.chatListeners, runID)
 		c.mu.Unlock()
 	}()
-
-	var cb StreamCallback
-	if len(onDelta) > 0 {
-		cb = onDelta[0]
-	}
 
 	var lastDelta string
 	for {
@@ -867,6 +1036,13 @@ func (c *WSClient) SendChatStream(ctx context.Context, sessionKey, message strin
 		return "", fmt.Errorf("not connected to gateway (reconnecting)")
 	}
 
+	// Use ChatTimeout if no deadline set
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.cfg.ChatTimeout)
+		defer cancel()
+	}
+
 	idempotencyKey := uuid.New().String()
 	params := chatSendParams{
 		SessionKey:     sessionKey,
@@ -879,18 +1055,20 @@ func (c *WSClient) SendChatStream(ctx context.Context, sessionKey, message strin
 	reqID := uuid.New().String()
 	req := wsFrame{Type: "req", ID: reqID, Method: "chat.send", Params: paramsJSON}
 
+	// Pre-register chat listener keyed by reqID — readLoop auto-registers by runID
+	eventCh := make(chan chatEvent, 32)
+
 	respCh := make(chan wsFrame, 1)
 	c.mu.Lock()
 	c.pending[reqID] = respCh
+	c.chatPreReg[reqID] = eventCh
 	c.mu.Unlock()
 
 	reqBytes, _ := json.Marshal(req)
-	c.mu.Lock()
-	err := c.conn.WriteMessage(websocket.TextMessage, reqBytes)
-	c.mu.Unlock()
-	if err != nil {
+	if err := c.writeMessage(websocket.TextMessage, reqBytes); err != nil {
 		c.mu.Lock()
 		delete(c.pending, reqID)
+		delete(c.chatPreReg, reqID)
 		c.mu.Unlock()
 		return "", fmt.Errorf("sending chat.send: %w", err)
 	}
@@ -898,16 +1076,22 @@ func (c *WSClient) SendChatStream(ctx context.Context, sessionKey, message strin
 	select {
 	case resp := <-respCh:
 		if resp.Error != nil {
+			c.mu.Lock()
+			delete(c.chatPreReg, reqID)
+			c.mu.Unlock()
 			return "", fmt.Errorf("chat.send error: %s", resp.Error.Message)
 		}
 		var chatResp chatSendResult
 		if err := json.Unmarshal(resp.Payload, &chatResp); err != nil {
 			return "", fmt.Errorf("parsing chat.send response: %w", err)
 		}
-		return c.waitForChatFinal(ctx, chatResp.RunID, onDelta)
+
+		// Listener already registered by readLoop via chatPreReg
+		return c.waitForChatFinalWithCh(ctx, chatResp.RunID, eventCh, onDelta)
 	case <-ctx.Done():
 		c.mu.Lock()
 		delete(c.pending, reqID)
+		delete(c.chatPreReg, reqID)
 		c.mu.Unlock()
 		return "", ctx.Err()
 	}
@@ -927,15 +1111,28 @@ func (c *WSClient) Close() error {
 	// Stop readLoop
 	close(c.stopCh)
 
+	// Stop ping loop
+	c.mu.Lock()
+	if c.pingStop != nil {
+		select {
+		case <-c.pingStop:
+		default:
+			close(c.pingStop)
+		}
+	}
+	c.mu.Unlock()
+
 	c.connMu.Lock()
 	defer c.connMu.Unlock()
 
 	if c.conn != nil {
-		// Send close frame
+		// Send close frame with writeMu
+		c.writeMu.Lock()
 		_ = c.conn.WriteMessage(
 			websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
 		)
+		c.writeMu.Unlock()
 		return c.conn.Close()
 	}
 	return nil

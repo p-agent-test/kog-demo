@@ -993,6 +993,12 @@ Snapshot mesajının `type` alanı `"snapshot"` olarak set edilir (orderbook iç
 
 ### 7.4 Kafka Topic Yapısı
 
+
+> 📋 **Review Notu (M1):** Kafka partition stratejisi review'da iyileştirilmiştir. **Çözüm:** 
+> - Public topics: 64 partition (market-keyed) → broadcast pattern
+> - Private topics: 64 partition (user_id-keyed) → sticky routing ile sync
+> - Market sayısından bağımsız fixed partition count daha manageable
+
 | Topic | Key | Partitions | Producers | Consumer (ws-hub) |
 |---|---|---|---|---|
 | `ws.ticker` | market | 64 | Match engine | Broadcast to `ticker@{market}` |
@@ -2015,6 +2021,131 @@ setInterval(() => {
 | Versiyon | Tarih | Yazar | Değişiklik |
 |---|---|---|---|
 | 1.0 | 2026-02-19 | Platform Engineering | İlk draft |
+
+
+
+---
+
+## 📋 REVIEW INTEGRATION NOTES (2026-02-23)
+
+Bu bölümde, Technical Review (PRD-2026-003-REVIEW) bulguları PRD'ye entegre edilmiştir. Review sonuçları ve öneriler aşağıdaki kategorilerde gruplandırılmıştır:
+
+### İzolasyon Validasyonu
+- **Core İzolasyon:** ✅ Sağlam (ayrı pod set, consumer group, route)
+- **Shared Resource Risk:** ⚠️ Düşük-Orta (Kafka, KrakenD, snapshot service)
+- **Genel Skor:** %85 (action item'lar tamamlanırsa %95+)
+
+### Deployment Stratejisi İyileştirmeleri
+
+#### M1 — Kafka Partition Strategy
+- **İyileştirme:** Market sayısı ile orantılı yerine fixed 64 partition
+- **Rationale:** Market scale'ı bağımsız, daha manageable
+- **Key strategy:** Market-keyed (public), user_id-keyed (private)
+
+#### M4 — HPA Metrik Kombinasyonu  
+- **İyileştirme:** Single connection metric yerine CPU + connection + throughput
+- **Metrics:**
+  - Primary: CPU utilization (>70%)
+  - Secondary: Active connections (>8000 per pod)
+  - Tertiary: Message rate (>400K msg/s per pod)
+- **Result:** Daha reliable scaling decisions
+
+#### M5 — Snapshot Multi-Pod Staleness
+- **Risk:** Farklı pod'lardan gelen snapshot'lar stale olabilir
+- **Solution:** Snapshot'ta `snapshotSeq` ve `lastUpdateId` metadata eklendi
+- **Client:** Gap detection'ında bu metadata'yı optional olarak kullanabilir
+
+#### M7 — Pod Scale Event Handling
+- **Risk:** Consistent hash ring değiştiğinde user farklı pod'a düşer
+- **Solution:** Pod scale event'te graceful reconnect mechanism
+- **Implementation:** KrakenD hash ring update → affected user'lara reconnect recommendation
+
+#### M8 — Gap Buffer Memory Optimization
+- **İyileştirme:** Per-channel adaptive buffer size policy
+- **Allocation:**
+  - Orderbook (@): 100K mesaj
+  - Trades (@): 50K mesaj
+  - Snapshot channels (depth@, ticker@): 1K mesaj
+  - Private channels: 1K mesaj
+- **Memory impact:** ~200MB per pod (vs üst tahmini 1.5GB)
+
+### Security & Risk Improvements
+
+#### M6 — JWT Revocation Propagation (Phase 2)
+- **Risk:** Token revoke edilse bile 24 saat açık connection devam eder
+- **Solution (Phase 2):**
+  1. KrakenD webhook → ws-hub notification
+  2. ws-hub admin API: `POST /admin/disconnect?userId=u_12345&reason=token_revoked`
+  3. Affected connection'lar graceful disconnect (code 4003)
+
+### Açık Soruların Çözümleri
+
+#### Q1 — Private Channel Routing: **✅ KARAR → Sticky Hash via KrakenD**
+- Pod-to-pod relay yerine KrakenD consistent hashing
+- Avantajlar: Simple, efficient Kafka partition assignment
+- Pod scale event handling dengan graceful reconnect
+
+#### Q2 — Sequence Number Source: **✅ KARAR → Hybrid**
+- **Public channel:** Kafka partition offset = sequence (pod-independent, persistent)
+- **Private channel:** Pod-local atomic counter (pod restart → full snapshot fallback)
+- Rationale: Public consistency & private simplicity trade-off
+
+#### Q3 — API Key Auth: **⏳ Phase 2 feedback'ine göre**
+- v2 GA: JWT ile launch
+- Phase 3 (week 8-12): MM'ler latency/token management şikayet ederse → API key support ekle
+
+#### Q4 — Positions Channel: **✅ KARAR → Placeholder (Futures launch'a kadar)**
+- Subscribe → 40002 error ("channel not available yet")
+- Futures PRD launch'ı ile activate edilecek
+
+#### Q5 — SDK Dilleri: **✅ KARAR → Python + TypeScript (GA), Go (Phase 3)**
+- v2 GA: Python + TypeScript SDK
+- Phase 3 (week 8-12): Go SDK (MM feedback'ine göre)
+
+#### Q6 — Dedicated MM Pod Pool: **⏳ Phase 2 test sonrası**
+- Default: Shared pool (resource efficient)
+- Eğer MM latency problemi yaşarsa → dedicated pool ekle (Phase 2-3)
+
+#### Q7 — Message Batching: **✅ KARAR → Default kapalı**
+- Latency-sensitive MM'ler için batching disabled
+- Retail tier'da optional (config: enableForTier: ["retail"])
+
+#### Q8 — KrakenD WebSocket Proxy: **⏳ PoC (Phase 0) sonrası**
+- PoC test: 1 pod KrakenD @ 10K concurrent WS connection
+- CPU/memory/latency profiling → decision point
+- Fail ise custom Go proxy (2-3 hafta dev) alternatifi
+
+### Ek Action Items (Phase 1-3)
+
+- [ ] Kafka topic ve partition strategy netleştir + load test
+- [ ] KrakenD deployment (shared vs separate instance) belirle
+- [ ] KrakenD HPA policy tanımla (CPU + connection + throughput metrics)
+- [ ] Snapshot service (order-api, wallet) capacity test (v2 load + 20%)
+- [ ] Redis scope: JWT blacklist only, trades snapshot → ws-hub in-memory cache
+- [ ] Pod scale event handling: graceful reconnect mechanism
+- [ ] Gap buffer memory policy: per-channel adaptive sizing
+- [ ] JWT revocation propagation (Phase 2): KrakenD webhook + ws-hub admin API
+- [ ] Load test scenario spec'lerini PRD'ye ekle (Section 14.3)
+- [ ] Documentation checklist (Section 14'e Appendix olarak ekle)
+
+### gRPC Streaming Önerisi (Phase 3 — Optional)
+
+Teknik review, **server-side MM bot'ları** için gRPC bidirectional streaming önermiştir:
+- **Avantajlar:** %40-60 bandwidth tasarrufu, %50 CPU azalma, built-in backpressure
+- **Hedef kitle:** Backend bot'lar (Web/mobile değil)
+- **Faz:** Phase 3 (week 12-24) — WebSocket GA'dan sonra, MM feedback'ine göre
+- **Timeline:** Week 12'de MM feedback → gRPC PoC → Phase 3a (week 16-20)
+- **Karar noktası:** MM'ler WS'ten memnun mu? Memnun değilse → gRPC PoC başla
+
+**gRPC Implementation (eğer approved):**
+- Aynı ws-hub-v2 binary'ne gRPC server eklenir (port 50051)
+- Kafka consumer + sequence manager paylaşımlı (WebSocket ile aynı)
+- Auth: JWT + API Key + mTLS (Phase 2)
+- Proto schema: Protobuf message definitions stream_v2.proto'da
+
+**Detaylı gRPC spec:** Bkz. Appendix F (gRPC Streaming API Design)
+
+---
 
 ---
 

@@ -10,6 +10,160 @@ import (
 	"github.com/rs/zerolog"
 )
 
+const defaultSplitMaxLen = 3000
+
+// splitMessage splits a long message into chunks suitable for Slack posting.
+// It tries to split on markdown headers, code blocks, and paragraph breaks.
+func splitMessage(text string, maxLen int) []string {
+	if maxLen <= 0 {
+		maxLen = defaultSplitMaxLen
+	}
+	if len(text) <= maxLen {
+		return []string{text}
+	}
+
+	// Strategy 1: Split on ## or ### headers
+	if chunks := splitOnHeaders(text, maxLen); len(chunks) > 1 {
+		return chunks
+	}
+
+	// Strategy 2: Split on ``` code blocks
+	if chunks := splitOnCodeBlocks(text, maxLen); len(chunks) > 1 {
+		return chunks
+	}
+
+	// Strategy 3: Split on \n\n paragraph breaks
+	if chunks := splitOnParagraphs(text, maxLen); len(chunks) > 1 {
+		return chunks
+	}
+
+	// Strategy 4: Hard split at maxLen on newline boundaries
+	return hardSplit(text, maxLen)
+}
+
+// splitOnHeaders splits text on lines starting with ## or ###.
+func splitOnHeaders(text string, maxLen int) []string {
+	lines := strings.Split(text, "\n")
+	var chunks []string
+	var current strings.Builder
+
+	for _, line := range lines {
+		isHeader := strings.HasPrefix(line, "## ") || strings.HasPrefix(line, "### ")
+		if isHeader && current.Len() > 0 {
+			chunks = append(chunks, strings.TrimSpace(current.String()))
+			current.Reset()
+		}
+		if current.Len() > 0 {
+			current.WriteByte('\n')
+		}
+		current.WriteString(line)
+	}
+	if current.Len() > 0 {
+		chunks = append(chunks, strings.TrimSpace(current.String()))
+	}
+
+	if len(chunks) <= 1 {
+		return chunks
+	}
+
+	// Re-split any chunks that are still too long
+	return reSplitChunks(chunks, maxLen)
+}
+
+// splitOnCodeBlocks splits text so each ```...``` block is its own chunk.
+func splitOnCodeBlocks(text string, maxLen int) []string {
+	parts := strings.Split(text, "```")
+	if len(parts) < 3 {
+		return nil // no complete code block
+	}
+
+	var chunks []string
+	for i, part := range parts {
+		if i%2 == 0 {
+			// Text between code blocks
+			trimmed := strings.TrimSpace(part)
+			if trimmed != "" {
+				chunks = append(chunks, trimmed)
+			}
+		} else {
+			// Code block content — re-wrap with ```
+			chunks = append(chunks, "```"+part+"```")
+		}
+	}
+
+	if len(chunks) <= 1 {
+		return chunks
+	}
+
+	return reSplitChunks(chunks, maxLen)
+}
+
+// splitOnParagraphs splits text on double newlines for chunks > 2000 chars.
+func splitOnParagraphs(text string, maxLen int) []string {
+	paragraphs := strings.Split(text, "\n\n")
+	if len(paragraphs) <= 1 {
+		return nil
+	}
+
+	var chunks []string
+	var current strings.Builder
+
+	for _, para := range paragraphs {
+		para = strings.TrimSpace(para)
+		if para == "" {
+			continue
+		}
+		// If adding this paragraph would exceed maxLen, flush current
+		if current.Len() > 0 && current.Len()+len(para)+2 > maxLen {
+			chunks = append(chunks, strings.TrimSpace(current.String()))
+			current.Reset()
+		}
+		if current.Len() > 0 {
+			current.WriteString("\n\n")
+		}
+		current.WriteString(para)
+	}
+	if current.Len() > 0 {
+		chunks = append(chunks, strings.TrimSpace(current.String()))
+	}
+
+	if len(chunks) <= 1 {
+		return nil
+	}
+	return chunks
+}
+
+// hardSplit splits text at maxLen boundaries, preferring newline breaks.
+func hardSplit(text string, maxLen int) []string {
+	var chunks []string
+	for len(text) > maxLen {
+		// Find last newline before maxLen
+		cut := strings.LastIndex(text[:maxLen], "\n")
+		if cut <= 0 {
+			cut = maxLen
+		}
+		chunks = append(chunks, strings.TrimSpace(text[:cut]))
+		text = strings.TrimSpace(text[cut:])
+	}
+	if len(text) > 0 {
+		chunks = append(chunks, text)
+	}
+	return chunks
+}
+
+// reSplitChunks takes chunks and re-splits any that exceed maxLen.
+func reSplitChunks(chunks []string, maxLen int) []string {
+	var result []string
+	for _, chunk := range chunks {
+		if len(chunk) <= maxLen {
+			result = append(result, chunk)
+		} else {
+			result = append(result, hardSplit(chunk, maxLen)...)
+		}
+	}
+	return result
+}
+
 // WSBridge wraps WSClient and implements MessageForwarder (slack.MessageForwarder).
 // Uses persistent WebSocket for OpenClaw communication with streaming updates.
 type WSBridge struct {
@@ -171,9 +325,20 @@ func (b *WSBridge) HandleMessage(ctx context.Context, channelID, userID, text, t
 			return
 		}
 
-		// Final update (in case the last delta was throttled)
+		// Final update — split long responses into multiple messages
 		if response != "" && response != "NO_REPLY" && response != "HEARTBEAT_OK" {
-			sm.update(response, true)
+			chunks := splitMessage(response, defaultSplitMaxLen)
+			if len(chunks) <= 1 {
+				// Single message — just finalize the streaming message
+				sm.update(response, true)
+			} else {
+				// Multiple chunks — finalize first chunk in streaming message, post rest as new messages
+				sm.update(chunks[0], true)
+				for _, chunk := range chunks[1:] {
+					time.Sleep(300 * time.Millisecond)
+					b.poster.PostMessage(channelID, chunk, replyThread)
+				}
+			}
 		}
 
 		if replyThread != "" {
