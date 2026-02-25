@@ -8,7 +8,10 @@ func (s *Store) migrate() error {
 	if err := s.migrateV1(); err != nil {
 		return err
 	}
-	return s.migrateV2()
+	if err := s.migrateV2(); err != nil {
+		return err
+	}
+	return s.migrateV3()
 }
 
 func (s *Store) migrateV1() error {
@@ -170,6 +173,42 @@ func (s *Store) migrateV2() error {
 
 	// Update schema version
 	if _, err := s.db.Exec(`INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '2')`); err != nil {
+		return fmt.Errorf("failed to update schema version: %w", err)
+	}
+
+	return nil
+}
+
+func (s *Store) migrateV3() error {
+	var version string
+	err := s.db.QueryRow(`SELECT value FROM meta WHERE key = 'schema_version'`).Scan(&version)
+	if err != nil || version >= "3" {
+		return nil
+	}
+
+	schema := `
+	CREATE TABLE IF NOT EXISTS session_cleanup (
+		id              TEXT PRIMARY KEY,
+		session_key     TEXT NOT NULL,
+		channel_id      TEXT NOT NULL,
+		thread_ts       TEXT NOT NULL,
+		status          TEXT NOT NULL DEFAULT 'warned',
+		warned_at       INTEGER NOT NULL,
+		responded_at    INTEGER,
+		expires_at      INTEGER NOT NULL,
+		message_ts      TEXT,
+		created_at      INTEGER NOT NULL
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_cleanup_status ON session_cleanup(status);
+	CREATE INDEX IF NOT EXISTS idx_cleanup_expires ON session_cleanup(expires_at);
+	`
+
+	if _, err := s.db.Exec(schema); err != nil {
+		return fmt.Errorf("failed to execute migration v3: %w", err)
+	}
+
+	if _, err := s.db.Exec(`INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '3')`); err != nil {
 		return fmt.Errorf("failed to update schema version: %w", err)
 	}
 

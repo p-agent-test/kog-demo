@@ -28,6 +28,12 @@ type ProjectInteractionHandler interface {
 	OnProjectArchive(channelID, threadTS, userID, slug string)
 }
 
+// SessionCleanupHandler processes session cleanup button callbacks.
+type SessionCleanupHandler interface {
+	KeepSession(sessionKey string) error
+	CloseSession(sessionKey string) error
+}
+
 // Handler processes Slack events.
 // Interactive callbacks (approval buttons) are handled inline.
 // Regular messages are forwarded to Kog-2 via the MessageForwarder (bridge).
@@ -39,6 +45,7 @@ type Handler struct {
 	forwarder       MessageForwarder
 	approvalHandler ApprovalHandler
 	projectHandler  ProjectInteractionHandler
+	cleanupHandler  SessionCleanupHandler
 }
 
 // NewHandler creates a new event handler.
@@ -62,6 +69,11 @@ func (h *Handler) SetApprovalHandler(ah ApprovalHandler) {
 // SetProjectHandler sets the handler for project button callbacks.
 func (h *Handler) SetProjectHandler(ph ProjectInteractionHandler) {
 	h.projectHandler = ph
+}
+
+// SetCleanupHandler sets the handler for session cleanup button callbacks.
+func (h *Handler) SetCleanupHandler(ch SessionCleanupHandler) {
+	h.cleanupHandler = ch
 }
 
 // SetSocket sets the Socket Mode client for acknowledging events.
@@ -190,6 +202,20 @@ func (h *Handler) handleInteraction(ctx context.Context, evt socketmode.Event) {
 			slug := strings.TrimPrefix(action.ActionID, "project_start_")
 			if h.projectHandler != nil {
 				h.projectHandler.OnProjectContinue(callback.Channel.ID, callback.Message.Timestamp, callback.User.ID, slug)
+			}
+		case strings.HasPrefix(action.ActionID, "session_keep_"):
+			sessionKey := strings.TrimPrefix(action.ActionID, "session_keep_")
+			if h.cleanupHandler != nil {
+				if err := h.cleanupHandler.KeepSession(sessionKey); err != nil {
+					h.logger.Warn().Err(err).Str("session", sessionKey).Msg("failed to keep session")
+				}
+			}
+		case strings.HasPrefix(action.ActionID, "session_close_"):
+			sessionKey := strings.TrimPrefix(action.ActionID, "session_close_")
+			if h.cleanupHandler != nil {
+				if err := h.cleanupHandler.CloseSession(sessionKey); err != nil {
+					h.logger.Warn().Err(err).Str("session", sessionKey).Msg("failed to close session")
+				}
 			}
 		}
 	}

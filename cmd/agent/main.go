@@ -17,6 +17,7 @@ import (
 
 	"github.com/p-blackswan/platform-agent/internal/agent"
 	"github.com/p-blackswan/platform-agent/internal/bridge"
+	"github.com/p-blackswan/platform-agent/internal/cleanup"
 	"github.com/p-blackswan/platform-agent/internal/config"
 	ghclient "github.com/p-blackswan/platform-agent/internal/github"
 	"github.com/p-blackswan/platform-agent/internal/health"
@@ -420,6 +421,66 @@ func main() {
 			agentInstance.SetSlack(slackApp)
 			// Wire Agent as approval handler so Slack buttons trigger re-queue
 			slackHandler.SetApprovalHandler(agentInstance)
+
+			// Initialize session cleanup system
+			cleanupCfg := cleanup.DefaultConfig()
+			if days := os.Getenv("AGENT_STALE_THRESHOLD_DAYS"); days != "" {
+				if d, err := fmt.Sscanf(days, "%d", &cleanupCfg.StaleThresholdDays); err != nil || d == 0 {
+					logger.Warn().Str("value", days).Msg("invalid AGENT_STALE_THRESHOLD_DAYS")
+				}
+			}
+			if hours := os.Getenv("AGENT_WARNING_TTL_HOURS"); hours != "" {
+				var h int
+				if _, err := fmt.Sscanf(hours, "%d", &h); err == nil && h > 0 {
+					cleanupCfg.WarningTTL = time.Duration(h) * time.Hour
+				}
+			}
+
+			cleanupStore := cleanup.NewCleanupStore(dataStore.DB())
+			sessionDB := cleanup.NewStoreSessionDB(dataStore.DB())
+			cleaner := cleanup.NewCleaner(cleanupCfg, cleanupStore, sessionDB, bridge.NewSlackPoster(slackApp), logger)
+
+			// Wire cleanup handler for Slack button callbacks
+			slackHandler.SetCleanupHandler(cleaner)
+
+			// Goroutine: warn stale sessions every 6 hours
+			go func() {
+				ticker := time.NewTicker(6 * time.Hour)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-ticker.C:
+						if err := cleaner.WarnStaleSessions(ctx); err != nil {
+							logger.Warn().Err(err).Msg("stale session warning error")
+						}
+					}
+				}
+			}()
+
+			// Goroutine: process expired warnings every hour
+			go func() {
+				ticker := time.NewTicker(1 * time.Hour)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-ticker.C:
+						if err := cleaner.ProcessExpiredWarnings(ctx); err != nil {
+							logger.Warn().Err(err).Msg("expired warning processing error")
+						}
+						// Also clean up old records
+						_ = cleanupStore.CleanupOldRecords(30)
+					}
+				}
+			}()
+
+			logger.Info().
+				Int("stale_threshold_days", cleanupCfg.StaleThresholdDays).
+				Dur("warning_ttl", cleanupCfg.WarningTTL).
+				Msg("session cleanup system initialized")
 
 			logger.Info().Msg("Slack Socket Mode enabled (bridge + interactive callbacks)")
 			wg.Add(1)
