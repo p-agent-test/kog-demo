@@ -177,10 +177,12 @@ func reSplitChunks(chunks []string, maxLen int) []string {
 // WSBridge wraps WSClient and implements MessageForwarder (slack.MessageForwarder).
 // Uses persistent WebSocket for OpenClaw communication with streaming updates.
 type WSBridge struct {
-	ws        *WSClient
-	poster    SlackPoster
-	botUserID string
-	logger    zerolog.Logger
+	ws              *WSClient
+	poster          SlackPoster
+	botUserID       string
+	logger          zerolog.Logger
+	historyProvider ThreadHistoryProvider
+	warmTracker     *WarmTracker
 
 	// Embed Bridge for thread tracking and IsActiveThread
 	*Bridge
@@ -194,11 +196,12 @@ func NewWSBridge(ws *WSClient, poster SlackPoster, botUserID string, logger zero
 	}, poster, logger)
 
 	return &WSBridge{
-		ws:        ws,
-		poster:    poster,
-		botUserID: botUserID,
-		logger:    logger.With().Str("component", "ws-bridge").Logger(),
-		Bridge:    base,
+		ws:          ws,
+		poster:      poster,
+		botUserID:   botUserID,
+		logger:      logger.With().Str("component", "ws-bridge").Logger(),
+		Bridge:      base,
+		warmTracker: NewWarmTracker(),
 	}
 }
 
@@ -257,6 +260,11 @@ func (sm *streamingMessage) update(text string, isFinal bool) {
 
 	sm.lastText = text
 	sm.lastUpdate = time.Now()
+}
+
+// SetThreadHistoryProvider sets the provider for auto-injecting thread history on cold sessions.
+func (b *WSBridge) SetThreadHistoryProvider(p ThreadHistoryProvider) {
+	b.historyProvider = p
 }
 
 // HandleMessageWithSession processes a message with an explicit session key (for project routing).
@@ -320,8 +328,23 @@ func (b *WSBridge) handleMessageInternal(ctx context.Context, channelID, userID,
 			}
 		}
 
+		// Auto-inject thread history on cold sessions
+		messageToSend := text
+		if threadTS != "" && b.historyProvider != nil && !b.warmTracker.IsWarm(sessionKey) {
+			history, histErr := b.historyProvider.GetThreadHistory(channelID, threadTS, maxHistoryMessages)
+			if histErr != nil {
+				b.logger.Warn().Err(histErr).Str("thread", threadTS).Msg("failed to fetch thread history")
+			} else {
+				formatted := FormatThreadHistory(history, messageTS)
+				if formatted != "" {
+					messageToSend = formatted + "\n\n" + text
+				}
+			}
+		}
+		b.warmTracker.MarkWarm(sessionKey)
+
 		contextMessage := fmt.Sprintf("[platform:slack user:<@%s> channel:%s thread:%s] %s",
-			userID, channelID, threadTS, text)
+			userID, channelID, threadTS, messageToSend)
 
 		replyThread := threadTS
 		if replyThread == "" {

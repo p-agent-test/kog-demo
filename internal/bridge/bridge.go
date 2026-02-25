@@ -75,14 +75,16 @@ type ThreadLookup func(channel, threadTS string) bool
 
 // Bridge forwards Slack messages to Kog-2 and relays responses.
 type Bridge struct {
-	cfg           Config
-	poster        SlackPoster
-	sem           chan struct{}
-	logger        zerolog.Logger
-	mu            sync.Mutex
-	activeThreads map[string]bool // channel:threadTS → tracked
-	threadLookup  ThreadLookup    // optional persistent fallback
-	threadSaver   ThreadSaver     // optional persistent writer
+	cfg             Config
+	poster          SlackPoster
+	sem             chan struct{}
+	logger          zerolog.Logger
+	mu              sync.Mutex
+	activeThreads   map[string]bool // channel:threadTS → tracked
+	threadLookup    ThreadLookup    // optional persistent fallback
+	threadSaver     ThreadSaver     // optional persistent writer
+	historyProvider ThreadHistoryProvider
+	warmTracker     *WarmTracker
 }
 
 // New creates a new Bridge.
@@ -106,6 +108,7 @@ func New(cfg Config, poster SlackPoster, logger zerolog.Logger) *Bridge {
 		sem:           make(chan struct{}, cfg.MaxConcurrent),
 		logger:        logger.With().Str("component", "bridge").Logger(),
 		activeThreads: make(map[string]bool),
+		warmTracker:   NewWarmTracker(),
 	}
 }
 
@@ -125,6 +128,11 @@ type AgentResponse struct {
 		Code    string `json:"code"`
 		Message string `json:"message"`
 	} `json:"error"`
+}
+
+// SetThreadHistoryProvider sets the provider for auto-injecting thread history on cold sessions.
+func (b *Bridge) SetThreadHistoryProvider(p ThreadHistoryProvider) {
+	b.historyProvider = p
 }
 
 // SetThreadLookup sets an optional persistent fallback for thread tracking.
@@ -265,10 +273,25 @@ func (b *Bridge) handleMessageInternal(ctx context.Context, channelID, userID, t
 			sessionID = fmt.Sprintf("%s-%s", b.cfg.SessionPrefix, channelID)
 		}
 
+		// Auto-inject thread history on cold sessions
+		messageToSend := text
+		if threadTS != "" && b.historyProvider != nil && !b.warmTracker.IsWarm(sessionID) {
+			history, histErr := b.historyProvider.GetThreadHistory(channelID, threadTS, maxHistoryMessages)
+			if histErr != nil {
+				b.logger.Warn().Err(histErr).Str("thread", threadTS).Msg("failed to fetch thread history")
+			} else {
+				formatted := FormatThreadHistory(history, messageTS)
+				if formatted != "" {
+					messageToSend = formatted + "\n\n" + text
+				}
+			}
+		}
+		b.warmTracker.MarkWarm(sessionID)
+
 		// Register Slack context with agent so async task completions route back here
 		b.registerSessionContext(sessionID, channelID, ctxThread)
 
-		resp, err := b.callAgent(ctx, sessionID, channelID, ctxThread, userID, text)
+		resp, err := b.callAgent(ctx, sessionID, channelID, ctxThread, userID, messageToSend)
 
 		if err != nil {
 			b.logger.Error().Err(err).Msg("openclaw agent call failed")

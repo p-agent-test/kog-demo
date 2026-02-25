@@ -369,6 +369,14 @@ func main() {
 				logger.Info().Msg("📟 CLI bridge active (openclaw agent)")
 			}
 
+			// Wire thread history provider for cold session injection
+			threadProvider := bridge.NewSlackThreadProvider(slackApp, botUserID)
+			if wsBridge, ok := slackBridge.(*bridge.WSBridge); ok {
+				wsBridge.SetThreadHistoryProvider(threadProvider)
+			} else if cliBridge, ok := slackBridge.(*bridge.Bridge); ok {
+				cliBridge.SetThreadHistoryProvider(threadProvider)
+			}
+
 			// Wrap bridge with project router
 			var finalForwarder slackpkg.MessageForwarder
 			if safBridge, ok := slackBridge.(interface {
