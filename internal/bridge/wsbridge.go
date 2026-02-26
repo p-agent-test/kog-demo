@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -334,6 +335,9 @@ func (b *WSBridge) handleMessageInternal(ctx context.Context, channelID, userID,
 			}
 		}
 
+		// Register session context so task engine can resolve session_key for auto-drive policy
+		b.registerSessionContext(sessionKey, channelID, threadTS)
+
 		// Auto-inject project context + thread history on cold sessions
 		messageToSend := text
 		if !b.warmTracker.IsWarm(sessionKey) {
@@ -419,4 +423,25 @@ func (b *WSBridge) handleMessageInternal(ctx context.Context, channelID, userID,
 			b.trackThread(channelID, replyThread)
 		}
 	}()
+}
+
+// registerSessionContext registers the session context with the Management API
+// so that task submissions can auto-resolve the session_key for auto-drive policy.
+func (b *WSBridge) registerSessionContext(sessionID, channelID, threadTS string) {
+	mgmtURL := "http://localhost:8090"
+	body := fmt.Sprintf(`{"session_id":"%s","channel":"%s","thread_ts":"%s"}`, sessionID, channelID, threadTS)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", mgmtURL+"/api/v1/context", strings.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return
+	}
+	resp.Body.Close()
 }

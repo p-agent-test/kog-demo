@@ -79,15 +79,21 @@ func (h *Handlers) SubmitTask(c *fiber.Ctx) error {
 	// Auto-resolve response routing from session context store.
 	// This means Kog-2 doesn't need to manually include response_channel/thread —
 	// the bridge registers the Slack context, and task submission picks it up automatically.
-	if req.ResponseChannel == "" && h.sessionCtxStore != nil {
+	if h.sessionCtxStore != nil {
 		if sctx := h.sessionCtxStore.Resolve(req.CallerID); sctx != nil {
-			req.ResponseChannel = sctx.Channel
-			req.ResponseThread = sctx.ThreadTS
+			if req.ResponseChannel == "" {
+				req.ResponseChannel = sctx.Channel
+				req.ResponseThread = sctx.ThreadTS
+			}
+			if req.SessionKey == "" {
+				req.SessionKey = sctx.SessionID
+			}
 			h.logger.Debug().
 				Str("caller_id", req.CallerID).
 				Str("resolved_channel", sctx.Channel).
 				Str("resolved_thread", sctx.ThreadTS).
-				Msg("auto-resolved response routing from session context")
+				Str("resolved_session_key", sctx.SessionID).
+				Msg("auto-resolved context from session store")
 		}
 	}
 
