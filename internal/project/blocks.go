@@ -13,6 +13,9 @@ func StatusEmoji(p *Project) string {
 	if p.Status == "archived" {
 		return "📦"
 	}
+	if p.AutoDrive {
+		return "🔄"
+	}
 	if p.Status == "paused" {
 		return "⏸️"
 	}
@@ -107,9 +110,30 @@ func DashboardBlocks(projects []*Project, statsMap map[string]*ProjectStats, eve
 			lastLine += fmt.Sprintf(" — \"%s\"", truncateStr(evt.Summary, 60))
 		}
 
-		text := fmt.Sprintf("%s *%s*\n%s", emoji, p.Slug, p.Name)
+		slugLabel := p.Slug
+		if p.AutoDrive {
+			slugLabel += " (auto-driving)"
+		}
+		text := fmt.Sprintf("%s *%s*\n%s", emoji, slugLabel, p.Name)
+		if p.CurrentPhase != "" {
+			if statsLine.Len() > 0 {
+				statsLine.WriteString(fmt.Sprintf(" · Phase: %s", p.CurrentPhase))
+			} else {
+				statsLine.WriteString(fmt.Sprintf("Phase: %s", p.CurrentPhase))
+			}
+		}
 		if statsLine.Len() > 0 {
 			text += "\n" + statsLine.String()
+		}
+		if p.AutoDrive {
+			driveLine := fmt.Sprintf("⏱️ Drive: every %s", FormatDurationMs(p.DriveIntervalMs))
+			if p.ReportIntervalMs > 0 {
+				driveLine += fmt.Sprintf(" · Report: every %s", FormatDurationMs(p.ReportIntervalMs))
+			}
+			text += "\n" + driveLine
+			if p.AutoDriveUntil > 0 {
+				text += fmt.Sprintf(" · %s", TimeLeftStr(p.AutoDriveUntil))
+			}
 		}
 		text += "\n" + lastLine
 
@@ -128,9 +152,20 @@ func DashboardBlocks(projects []*Project, statsMap map[string]*ProjectStats, eve
 			slack.NewAccessory(continueBtn),
 		)
 		blocks = append(blocks, section)
+
+		var actionElements []slack.BlockElement
+		actionElements = append(actionElements, continueBtn)
+		if p.AutoDrive {
+			pauseBtn := slack.NewButtonBlockElement(
+				fmt.Sprintf("project_pause_%s", p.Slug), p.Slug,
+				slack.NewTextBlockObject("plain_text", "⏸️ Pause", false, false),
+			)
+			actionElements = append(actionElements, pauseBtn)
+		}
+		actionElements = append(actionElements, archiveBtn)
 		blocks = append(blocks, slack.NewActionBlock(
 			fmt.Sprintf("project_actions_%s", p.Slug),
-			continueBtn, archiveBtn,
+			actionElements...,
 		))
 	}
 

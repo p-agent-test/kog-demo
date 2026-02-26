@@ -19,6 +19,7 @@ var slugRe = regexp.MustCompile(`[^a-z0-9-]+`)
 var reservedSlugs = map[string]bool{
 	"projects": true, "projeler": true, "new": true, "decide": true,
 	"blocker": true, "archive": true, "resume": true, "help": true, "handoff": true,
+	"drive": true, "pause": true, "phase": true,
 }
 
 // GenerateSlug converts a name into a URL-safe slug.
@@ -115,13 +116,16 @@ func (s *Store) CreateProject(input CreateProjectInput) (*Project, error) {
 
 // GetProject retrieves a project by slug.
 func (s *Store) GetProject(slug string) (*Project, error) {
-	return s.scanProject(`SELECT id, slug, name, description, repo_url, status, owner_id, active_session, session_version, created_at, updated_at, archived_at FROM projects WHERE slug = ?`, slug)
+	return s.scanProject(`SELECT `+projectColumns+` FROM projects WHERE slug = ?`, slug)
 }
 
 // GetProjectByID retrieves a project by ID.
 func (s *Store) GetProjectByID(id string) (*Project, error) {
-	return s.scanProject(`SELECT id, slug, name, description, repo_url, status, owner_id, active_session, session_version, created_at, updated_at, archived_at FROM projects WHERE id = ?`, id)
+	return s.scanProject(`SELECT `+projectColumns+` FROM projects WHERE id = ?`, id)
 }
+
+// projectColumns is the standard column list for project queries.
+const projectColumns = `id, slug, name, description, repo_url, status, owner_id, active_session, session_version, created_at, updated_at, archived_at, auto_drive, drive_interval_ms, report_interval_ms, report_channel_id, report_thread_ts, current_phase, phases, auto_drive_until`
 
 func (s *Store) scanProject(query string, args ...interface{}) (*Project, error) {
 	p := &Project{}
@@ -133,6 +137,9 @@ func (s *Store) scanProject(query string, args ...interface{}) (*Project, error)
 		&p.ID, &p.Slug, &p.Name, &p.Description, &repoURL,
 		&p.Status, &p.OwnerID, &activeSession, &p.SessionVersion,
 		&p.CreatedAt, &p.UpdatedAt, &archivedAt,
+		&p.AutoDrive, &p.DriveIntervalMs, &p.ReportIntervalMs,
+		&p.ReportChannelID, &p.ReportThreadTS, &p.CurrentPhase,
+		&p.Phases, &p.AutoDriveUntil,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -154,7 +161,7 @@ func (s *Store) scanProject(query string, args ...interface{}) (*Project, error)
 
 // ListProjects lists projects with optional filters.
 func (s *Store) ListProjects(status, ownerID string) ([]*Project, error) {
-	query := `SELECT id, slug, name, description, repo_url, status, owner_id, active_session, session_version, created_at, updated_at, archived_at FROM projects WHERE 1=1`
+	query := `SELECT ` + projectColumns + ` FROM projects WHERE 1=1`
 	var args []interface{}
 
 	if status != "" {
@@ -178,7 +185,14 @@ func (s *Store) ListProjects(status, ownerID string) ([]*Project, error) {
 		p := &Project{}
 		var repoURL, activeSession sql.NullString
 		var archivedAt sql.NullInt64
-		if err := rows.Scan(&p.ID, &p.Slug, &p.Name, &p.Description, &repoURL, &p.Status, &p.OwnerID, &activeSession, &p.SessionVersion, &p.CreatedAt, &p.UpdatedAt, &archivedAt); err != nil {
+		if err := rows.Scan(
+			&p.ID, &p.Slug, &p.Name, &p.Description, &repoURL,
+			&p.Status, &p.OwnerID, &activeSession, &p.SessionVersion,
+			&p.CreatedAt, &p.UpdatedAt, &archivedAt,
+			&p.AutoDrive, &p.DriveIntervalMs, &p.ReportIntervalMs,
+			&p.ReportChannelID, &p.ReportThreadTS, &p.CurrentPhase,
+			&p.Phases, &p.AutoDriveUntil,
+		); err != nil {
 			return nil, fmt.Errorf("failed to scan project: %w", err)
 		}
 		if repoURL.Valid {
@@ -193,6 +207,70 @@ func (s *Store) ListProjects(status, ownerID string) ([]*Project, error) {
 		projects = append(projects, p)
 	}
 	return projects, rows.Err()
+}
+
+// ListAutoDriveProjects returns all projects with auto_drive enabled.
+func (s *Store) ListAutoDriveProjects() ([]*Project, error) {
+	query := `SELECT ` + projectColumns + ` FROM projects WHERE auto_drive = 1 AND status = 'active'`
+	rows, err := s.ds.DB().Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list auto-drive projects: %w", err)
+	}
+	defer rows.Close()
+
+	var projects []*Project
+	for rows.Next() {
+		p := &Project{}
+		var repoURL, activeSession sql.NullString
+		var archivedAt sql.NullInt64
+		if err := rows.Scan(
+			&p.ID, &p.Slug, &p.Name, &p.Description, &repoURL,
+			&p.Status, &p.OwnerID, &activeSession, &p.SessionVersion,
+			&p.CreatedAt, &p.UpdatedAt, &archivedAt,
+			&p.AutoDrive, &p.DriveIntervalMs, &p.ReportIntervalMs,
+			&p.ReportChannelID, &p.ReportThreadTS, &p.CurrentPhase,
+			&p.Phases, &p.AutoDriveUntil,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan project: %w", err)
+		}
+		if repoURL.Valid {
+			p.RepoURL = repoURL.String
+		}
+		if activeSession.Valid {
+			p.ActiveSession = activeSession.String
+		}
+		if archivedAt.Valid {
+			p.ArchivedAt = archivedAt.Int64
+		}
+		projects = append(projects, p)
+	}
+	return projects, rows.Err()
+}
+
+// UpdateAutoDrive updates the auto-drive fields for a project.
+func (s *Store) UpdateAutoDrive(projectID string, autoDrive bool, driveIntervalMs, reportIntervalMs int64, reportChannelID, reportThreadTS, currentPhase, phases string, autoDriveUntil int64) error {
+	now := time.Now().UnixMilli()
+	_, err := s.ds.DB().Exec(
+		`UPDATE projects SET auto_drive = ?, drive_interval_ms = ?, report_interval_ms = ?, report_channel_id = ?, report_thread_ts = ?, current_phase = ?, phases = ?, auto_drive_until = ?, updated_at = ? WHERE id = ?`,
+		autoDrive, driveIntervalMs, reportIntervalMs, reportChannelID, reportThreadTS, currentPhase, phases, autoDriveUntil, now, projectID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to update auto-drive: %w", err)
+	}
+	return nil
+}
+
+// UpdatePhase updates the current phase for a project.
+func (s *Store) UpdatePhase(projectID, phase string) error {
+	now := time.Now().UnixMilli()
+	_, err := s.ds.DB().Exec(
+		`UPDATE projects SET current_phase = ?, updated_at = ? WHERE id = ?`,
+		phase, now, projectID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to update phase: %w", err)
+	}
+	return nil
 }
 
 // UpdateProject updates project metadata.

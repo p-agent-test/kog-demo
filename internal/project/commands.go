@@ -18,15 +18,22 @@ const (
 	CmdBlocker
 	CmdArchive
 	CmdResume
+	CmdDrive
+	CmdPause
+	CmdPhase
 )
 
 // ProjectCommand represents a parsed project command.
 type ProjectCommand struct {
-	Type    CommandType
-	Slug    string
-	Message string
-	Name    string
-	RepoURL string
+	Type           CommandType
+	Slug           string
+	Message        string
+	Name           string
+	RepoURL        string
+	DriveInterval  string
+	ReportInterval string
+	Phases         string
+	Duration       string
 }
 
 var mentionRe = regexp.MustCompile(`<@[A-Z0-9]+>`)
@@ -85,6 +92,21 @@ func ParseCommand(text string) *ProjectCommand {
 			return &ProjectCommand{Type: CmdResume, Slug: strings.ToLower(parts[1])}
 		}
 		return nil
+
+	case "drive":
+		return parseDriveCommand(parts)
+
+	case "pause":
+		if len(parts) >= 2 {
+			return &ProjectCommand{Type: CmdPause, Slug: strings.ToLower(parts[1])}
+		}
+		return nil
+
+	case "phase":
+		if len(parts) >= 3 {
+			return &ProjectCommand{Type: CmdPhase, Slug: strings.ToLower(parts[1]), Message: parts[2]}
+		}
+		return nil
 	}
 
 	// Not a built-in command → could be a slug reference
@@ -98,7 +120,7 @@ func ParseCommand(text string) *ProjectCommand {
 }
 
 func parseNewCommand(text string, parts []string) *ProjectCommand {
-	// Expected: new project "Name" [--repo URL]
+	// Expected: new project "Name" [--repo URL] [--auto-drive 10m] [--report 1h] [--phases X,Y] [--duration 24h]
 	if len(parts) < 3 || strings.ToLower(parts[1]) != "project" {
 		return nil
 	}
@@ -114,11 +136,65 @@ func parseNewCommand(text string, parts []string) *ProjectCommand {
 		cmd.Name = parts[2]
 	}
 
-	// Extract --repo
+	// Extract flags
 	for i, p := range parts {
-		if p == "--repo" && i+1 < len(parts) {
-			cmd.RepoURL = parts[i+1]
-			break
+		switch p {
+		case "--repo":
+			if i+1 < len(parts) {
+				cmd.RepoURL = parts[i+1]
+			}
+		case "--auto-drive":
+			if i+1 < len(parts) {
+				cmd.DriveInterval = parts[i+1]
+			}
+		case "--report":
+			if i+1 < len(parts) {
+				cmd.ReportInterval = parts[i+1]
+			}
+		case "--phases":
+			if i+1 < len(parts) {
+				cmd.Phases = parts[i+1]
+			}
+		case "--duration":
+			if i+1 < len(parts) {
+				cmd.Duration = parts[i+1]
+			}
+		}
+	}
+
+	return cmd
+}
+
+func parseDriveCommand(parts []string) *ProjectCommand {
+	// drive <slug> [interval] [--report interval] [--phases X,Y] [--duration 24h]
+	if len(parts) < 2 {
+		return nil
+	}
+
+	cmd := &ProjectCommand{
+		Type: CmdDrive,
+		Slug: strings.ToLower(parts[1]),
+	}
+
+	// Optional positional interval
+	if len(parts) >= 3 && !strings.HasPrefix(parts[2], "--") {
+		cmd.DriveInterval = parts[2]
+	}
+
+	for i, p := range parts {
+		switch p {
+		case "--report":
+			if i+1 < len(parts) {
+				cmd.ReportInterval = parts[i+1]
+			}
+		case "--phases":
+			if i+1 < len(parts) {
+				cmd.Phases = parts[i+1]
+			}
+		case "--duration":
+			if i+1 < len(parts) {
+				cmd.Duration = parts[i+1]
+			}
 		}
 	}
 

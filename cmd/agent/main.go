@@ -385,7 +385,31 @@ func main() {
 				HandleMessage(ctx context.Context, channelID, userID, text, threadTS, messageTS string)
 				IsActiveThread(channelID, threadTS string) bool
 			}); ok {
-				projectRouter := project.NewRouter(projectStore, projectManager, safBridge, bridge.NewSlackPoster(slackApp), botUserID, logger)
+				slackPoster := bridge.NewSlackPoster(slackApp)
+				projectRouter := project.NewRouter(projectStore, projectManager, safBridge, slackPoster, botUserID, logger)
+
+				// Initialize auto-drive engine
+				projectDriver := project.NewDriver(projectStore, projectManager, safBridge, slackPoster, logger)
+				projectRouter.SetDriver(projectDriver)
+				projectHandlers.SetDriver(projectDriver)
+
+				// Restore auto-drive projects from DB
+				projectDriver.RestoreDriving()
+
+				// Expiry check goroutine
+				go func() {
+					ticker := time.NewTicker(5 * time.Minute)
+					defer ticker.Stop()
+					for {
+						select {
+						case <-ctx.Done():
+							return
+						case <-ticker.C:
+							projectDriver.CheckExpiry()
+						}
+					}
+				}()
+
 				finalForwarder = projectRouter
 			} else {
 				finalForwarder = slackBridge

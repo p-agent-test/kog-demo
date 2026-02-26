@@ -11,7 +11,10 @@ func (s *Store) migrate() error {
 	if err := s.migrateV2(); err != nil {
 		return err
 	}
-	return s.migrateV3()
+	if err := s.migrateV3(); err != nil {
+		return err
+	}
+	return s.migrateV4()
 }
 
 func (s *Store) migrateV1() error {
@@ -209,6 +212,37 @@ func (s *Store) migrateV3() error {
 	}
 
 	if _, err := s.db.Exec(`INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '3')`); err != nil {
+		return fmt.Errorf("failed to update schema version: %w", err)
+	}
+
+	return nil
+}
+
+func (s *Store) migrateV4() error {
+	var version string
+	err := s.db.QueryRow(`SELECT value FROM meta WHERE key = 'schema_version'`).Scan(&version)
+	if err != nil || version >= "4" {
+		return nil
+	}
+
+	// Add auto-drive columns to projects table
+	alterStmts := []string{
+		`ALTER TABLE projects ADD COLUMN auto_drive INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE projects ADD COLUMN drive_interval_ms INTEGER NOT NULL DEFAULT 600000`,
+		`ALTER TABLE projects ADD COLUMN report_interval_ms INTEGER NOT NULL DEFAULT 3600000`,
+		`ALTER TABLE projects ADD COLUMN report_channel_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE projects ADD COLUMN report_thread_ts TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE projects ADD COLUMN current_phase TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE projects ADD COLUMN phases TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE projects ADD COLUMN auto_drive_until INTEGER NOT NULL DEFAULT 0`,
+	}
+
+	for _, stmt := range alterStmts {
+		// Ignore "duplicate column" errors for idempotency
+		_, _ = s.db.Exec(stmt)
+	}
+
+	if _, err := s.db.Exec(`INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '4')`); err != nil {
 		return fmt.Errorf("failed to update schema version: %w", err)
 	}
 

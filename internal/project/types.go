@@ -14,6 +14,24 @@ type Project struct {
 	CreatedAt      int64  `json:"created_at"`
 	UpdatedAt      int64  `json:"updated_at"`
 	ArchivedAt     int64  `json:"archived_at,omitempty"`
+
+	// Auto-drive configuration
+	AutoDrive        bool   `json:"auto_drive"`
+	DriveIntervalMs  int64  `json:"drive_interval_ms,omitempty"`
+	ReportIntervalMs int64  `json:"report_interval_ms,omitempty"`
+	ReportChannelID  string `json:"report_channel_id,omitempty"`
+	ReportThreadTS   string `json:"report_thread_ts,omitempty"`
+	CurrentPhase     string `json:"current_phase,omitempty"`
+	Phases           string `json:"phases,omitempty"`
+	AutoDriveUntil   int64  `json:"auto_drive_until,omitempty"`
+}
+
+// AutoDriveConfig holds parsed auto-drive configuration from user input.
+type AutoDriveConfig struct {
+	DriveInterval  string   `json:"drive_interval"`
+	ReportInterval string   `json:"report_interval"`
+	Phases         []string `json:"phases,omitempty"`
+	Duration       string   `json:"duration,omitempty"`
 }
 
 // ProjectMemory represents a memory entry for a project.

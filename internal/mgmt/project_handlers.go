@@ -1,6 +1,10 @@
 package mgmt
 
 import (
+	"encoding/json"
+	"strings"
+	"time"
+
 	"github.com/gofiber/fiber/v2"
 	"github.com/rs/zerolog"
 
@@ -11,6 +15,7 @@ import (
 type ProjectHandlers struct {
 	store   *project.Store
 	manager *project.Manager
+	driver  *project.Driver
 	logger  zerolog.Logger
 }
 
@@ -21,6 +26,11 @@ func NewProjectHandlers(store *project.Store, manager *project.Manager, logger z
 		manager: manager,
 		logger:  logger.With().Str("component", "project_handlers").Logger(),
 	}
+}
+
+// SetDriver sets the auto-drive engine.
+func (h *ProjectHandlers) SetDriver(d *project.Driver) {
+	h.driver = d
 }
 
 // RegisterRoutes registers project API routes on the given fiber group.
@@ -37,6 +47,9 @@ func (h *ProjectHandlers) RegisterRoutes(v1 fiber.Router) {
 	pg.Post("/:slug/resume", h.Resume)
 	pg.Delete("/:slug", h.DeleteProject)
 	pg.Post("/:slug/message", h.SendMessage)
+	pg.Post("/:slug/drive", h.EnableDrive)
+	pg.Post("/:slug/pause", h.PauseDrive)
+	pg.Patch("/:slug/phase", h.UpdatePhase)
 }
 
 func (h *ProjectHandlers) CreateProject(c *fiber.Ctx) error {
@@ -261,6 +274,131 @@ func (h *ProjectHandlers) SendMessage(c *fiber.Ctx) error {
 		"session": p.ActiveSession,
 		"status":  "accepted",
 	})
+}
+
+func (h *ProjectHandlers) EnableDrive(c *fiber.Ctx) error {
+	slug := c.Params("slug")
+	p, err := h.store.GetProject(slug)
+	if err != nil || p == nil {
+		return c.Status(404).JSON(fiber.Map{"error": "project not found"})
+	}
+
+	var req project.AutoDriveConfig
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "invalid request body"})
+	}
+
+	driveMs := p.DriveIntervalMs
+	if req.DriveInterval != "" {
+		ms, err := project.DurationToMs(req.DriveInterval)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "invalid drive_interval"})
+		}
+		driveMs = ms
+	}
+	if driveMs <= 0 {
+		driveMs = 600000
+	}
+
+	reportMs := p.ReportIntervalMs
+	if req.ReportInterval != "" {
+		ms, err := project.DurationToMs(req.ReportInterval)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "invalid report_interval"})
+		}
+		reportMs = ms
+	}
+
+	phases := p.Phases
+	if len(req.Phases) > 0 {
+		phases = project.ParsePhasesString(strings.Join(req.Phases, ","))
+	}
+
+	currentPhase := p.CurrentPhase
+	if currentPhase == "" && phases != "" {
+		parts := strings.Split(phases, ",")
+		if len(parts) > 0 {
+			currentPhase = strings.TrimSpace(parts[0])
+		}
+	}
+
+	var autoDriveUntil int64
+	if req.Duration != "" {
+		dur, err := project.ParseDuration(req.Duration)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "invalid duration"})
+		}
+		autoDriveUntil = time.Now().Add(dur).UnixMilli()
+	}
+
+	reportChannelID := c.FormValue("report_channel_id", p.ReportChannelID)
+	reportThreadTS := c.FormValue("report_thread_ts", p.ReportThreadTS)
+
+	// Check JSON body for these too
+	var rawBody map[string]interface{}
+	if err := json.Unmarshal(c.Body(), &rawBody); err == nil {
+		if v, ok := rawBody["report_channel_id"].(string); ok && v != "" {
+			reportChannelID = v
+		}
+		if v, ok := rawBody["report_thread_ts"].(string); ok && v != "" {
+			reportThreadTS = v
+		}
+	}
+
+	if err := h.store.UpdateAutoDrive(p.ID, true, driveMs, reportMs,
+		reportChannelID, reportThreadTS, currentPhase, phases, autoDriveUntil); err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	// Start driving
+	if h.driver != nil {
+		updated, _ := h.store.GetProjectByID(p.ID)
+		if updated != nil {
+			h.driver.StartDriving(updated)
+		}
+	}
+
+	return c.JSON(fiber.Map{"status": "driving", "drive_interval_ms": driveMs, "report_interval_ms": reportMs})
+}
+
+func (h *ProjectHandlers) PauseDrive(c *fiber.Ctx) error {
+	slug := c.Params("slug")
+	p, err := h.store.GetProject(slug)
+	if err != nil || p == nil {
+		return c.Status(404).JSON(fiber.Map{"error": "project not found"})
+	}
+
+	if h.driver != nil {
+		h.driver.StopDriving(p.ID)
+	}
+
+	if err := h.store.UpdateAutoDrive(p.ID, false, p.DriveIntervalMs, p.ReportIntervalMs,
+		p.ReportChannelID, p.ReportThreadTS, p.CurrentPhase, p.Phases, p.AutoDriveUntil); err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	return c.JSON(fiber.Map{"status": "paused"})
+}
+
+func (h *ProjectHandlers) UpdatePhase(c *fiber.Ctx) error {
+	slug := c.Params("slug")
+	p, err := h.store.GetProject(slug)
+	if err != nil || p == nil {
+		return c.Status(404).JSON(fiber.Map{"error": "project not found"})
+	}
+
+	var req struct {
+		Phase string `json:"phase"`
+	}
+	if err := c.BodyParser(&req); err != nil || req.Phase == "" {
+		return c.Status(400).JSON(fiber.Map{"error": "phase is required"})
+	}
+
+	if err := h.store.UpdatePhase(p.ID, req.Phase); err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	return c.JSON(fiber.Map{"phase": req.Phase})
 }
 
 func contains(s, sub string) bool {

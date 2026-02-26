@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/slack-go/slack"
@@ -33,6 +34,7 @@ type Router struct {
 	manager *Manager
 	bridge  SessionAwareForwarder
 	poster  SlackResponder
+	driver  *Driver
 	botUID  string
 	logger  zerolog.Logger
 }
@@ -47,6 +49,11 @@ func NewRouter(store *Store, manager *Manager, bridge SessionAwareForwarder, pos
 		botUID:  botUserID,
 		logger:  logger.With().Str("component", "project.router").Logger(),
 	}
+}
+
+// SetDriver sets the auto-drive engine on the router.
+func (r *Router) SetDriver(d *Driver) {
+	r.driver = d
 }
 
 // HandleMessage implements the MessageForwarder interface with project-aware routing.
@@ -99,6 +106,18 @@ func (r *Router) HandleMessage(ctx context.Context, channelID, userID, text, thr
 
 		case CmdResume:
 			r.handleResume(channelID, userID, threadTS, messageTS, cmd)
+			return
+
+		case CmdDrive:
+			r.handleDrive(channelID, userID, threadTS, messageTS, cmd)
+			return
+
+		case CmdPause:
+			r.handlePause(channelID, userID, threadTS, messageTS, cmd)
+			return
+
+		case CmdPhase:
+			r.handlePhase(channelID, userID, threadTS, messageTS, cmd)
 			return
 
 		case CmdContinueProject, CmdMessageProject:
@@ -198,6 +217,20 @@ func (r *Router) handleNewProject(channelID, userID, threadTS, messageTS string,
 		return
 	}
 
+	// If --auto-drive was specified, enable it
+	if cmd.DriveInterval != "" && r.driver != nil {
+		driveCmd := &ProjectCommand{
+			Type:           CmdDrive,
+			Slug:           p.Slug,
+			DriveInterval:  cmd.DriveInterval,
+			ReportInterval: cmd.ReportInterval,
+			Phases:         cmd.Phases,
+			Duration:       cmd.Duration,
+		}
+		r.handleDrive(channelID, userID, threadTS, messageTS, driveCmd)
+		return
+	}
+
 	blocks := ProjectCreatedBlocks(p)
 	r.respondBlocks(channelID, threadTS, messageTS, fmt.Sprintf("✅ Project created: %s", p.Slug), blocks...)
 }
@@ -245,11 +278,175 @@ func (r *Router) handleBlocker(channelID, userID, threadTS, messageTS string, cm
 }
 
 func (r *Router) handleArchive(channelID, userID, threadTS, messageTS string, cmd *ProjectCommand) {
+	// Stop auto-drive if active
+	proj, _ := r.store.GetProject(cmd.Slug)
+	if proj != nil && r.driver != nil {
+		r.driver.StopDriving(proj.ID)
+	}
+
 	if err := r.store.ArchiveProject(cmd.Slug, userID); err != nil {
 		r.respond(channelID, threadTS, messageTS, fmt.Sprintf("⚠️ %s", err.Error()))
 		return
 	}
 	r.respond(channelID, threadTS, messageTS, fmt.Sprintf("📦 Project `%s` archived.", cmd.Slug))
+}
+
+func (r *Router) handleDrive(channelID, userID, threadTS, messageTS string, cmd *ProjectCommand) {
+	if r.driver == nil {
+		r.respond(channelID, threadTS, messageTS, "⚠️ Auto-drive not available.")
+		return
+	}
+
+	proj, _ := r.store.GetProject(cmd.Slug)
+	if proj == nil {
+		r.respond(channelID, threadTS, messageTS, fmt.Sprintf("Project `%s` not found.", cmd.Slug))
+		return
+	}
+	if proj.Status != "active" {
+		r.respond(channelID, threadTS, messageTS, fmt.Sprintf("Project `%s` is %s. Resume it first.", cmd.Slug, proj.Status))
+		return
+	}
+
+	// Parse intervals
+	driveMs := proj.DriveIntervalMs
+	if cmd.DriveInterval != "" {
+		ms, err := DurationToMs(cmd.DriveInterval)
+		if err != nil {
+			r.respond(channelID, threadTS, messageTS, fmt.Sprintf("⚠️ Invalid drive interval: %s", cmd.DriveInterval))
+			return
+		}
+		driveMs = ms
+	}
+	if driveMs <= 0 {
+		driveMs = 600000 // default 10m
+	}
+
+	reportMs := proj.ReportIntervalMs
+	if cmd.ReportInterval != "" {
+		ms, err := DurationToMs(cmd.ReportInterval)
+		if err != nil {
+			r.respond(channelID, threadTS, messageTS, fmt.Sprintf("⚠️ Invalid report interval: %s", cmd.ReportInterval))
+			return
+		}
+		reportMs = ms
+	}
+
+	phases := proj.Phases
+	if cmd.Phases != "" {
+		phases = ParsePhasesString(cmd.Phases)
+	}
+
+	currentPhase := proj.CurrentPhase
+	if currentPhase == "" && phases != "" {
+		// Set first phase
+		parts := strings.Split(phases, ",")
+		if len(parts) > 0 {
+			currentPhase = strings.TrimSpace(parts[0])
+		}
+	}
+
+	var autoDriveUntil int64
+	if cmd.Duration != "" {
+		dur, err := ParseDuration(cmd.Duration)
+		if err != nil {
+			r.respond(channelID, threadTS, messageTS, fmt.Sprintf("⚠️ Invalid duration: %s", cmd.Duration))
+			return
+		}
+		autoDriveUntil = time.Now().Add(dur).UnixMilli()
+	} else if proj.AutoDriveUntil > 0 {
+		autoDriveUntil = proj.AutoDriveUntil
+	}
+
+	reportChannel := proj.ReportChannelID
+	if reportChannel == "" {
+		reportChannel = channelID
+	}
+	reportThread := proj.ReportThreadTS
+	if reportThread == "" {
+		if threadTS != "" {
+			reportThread = threadTS
+		} else {
+			reportThread = messageTS
+		}
+	}
+
+	// Update DB
+	if err := r.store.UpdateAutoDrive(proj.ID, true, driveMs, reportMs,
+		reportChannel, reportThread, currentPhase, phases, autoDriveUntil); err != nil {
+		r.respond(channelID, threadTS, messageTS, fmt.Sprintf("⚠️ %s", err.Error()))
+		return
+	}
+
+	// Refresh project and start driving
+	proj, _ = r.store.GetProjectByID(proj.ID)
+	if proj != nil {
+		r.driver.StartDriving(proj)
+	}
+
+	msg := fmt.Sprintf("🔄 Auto-drive enabled for `%s`\n⏱️ Drive: every %s", cmd.Slug, FormatDurationMs(driveMs))
+	if reportMs > 0 {
+		msg += fmt.Sprintf(" · Report: every %s", FormatDurationMs(reportMs))
+	}
+	if currentPhase != "" {
+		msg += fmt.Sprintf("\n📍 Phase: %s", currentPhase)
+	}
+	if autoDriveUntil > 0 {
+		msg += fmt.Sprintf("\n⏰ Expires: %s", TimeLeftStr(autoDriveUntil))
+	}
+	r.respond(channelID, threadTS, messageTS, msg)
+
+	_ = r.store.AddEvent(&ProjectEvent{
+		ProjectID: proj.ID,
+		EventType: "auto_drive_started",
+		ActorID:   userID,
+		Summary:   fmt.Sprintf("Auto-drive enabled (every %s)", FormatDurationMs(driveMs)),
+	})
+}
+
+func (r *Router) handlePause(channelID, userID, threadTS, messageTS string, cmd *ProjectCommand) {
+	proj, _ := r.store.GetProject(cmd.Slug)
+	if proj == nil {
+		r.respond(channelID, threadTS, messageTS, fmt.Sprintf("Project `%s` not found.", cmd.Slug))
+		return
+	}
+
+	if r.driver != nil {
+		r.driver.StopDriving(proj.ID)
+	}
+
+	_ = r.store.UpdateAutoDrive(proj.ID, false, proj.DriveIntervalMs, proj.ReportIntervalMs,
+		proj.ReportChannelID, proj.ReportThreadTS, proj.CurrentPhase, proj.Phases, proj.AutoDriveUntil)
+
+	r.respond(channelID, threadTS, messageTS, fmt.Sprintf("⏸️ Auto-drive paused for `%s`. Use `drive %s` to resume.", cmd.Slug, cmd.Slug))
+
+	_ = r.store.AddEvent(&ProjectEvent{
+		ProjectID: proj.ID,
+		EventType: "auto_drive_paused",
+		ActorID:   userID,
+		Summary:   "Auto-drive paused",
+	})
+}
+
+func (r *Router) handlePhase(channelID, userID, threadTS, messageTS string, cmd *ProjectCommand) {
+	proj, _ := r.store.GetProject(cmd.Slug)
+	if proj == nil {
+		r.respond(channelID, threadTS, messageTS, fmt.Sprintf("Project `%s` not found.", cmd.Slug))
+		return
+	}
+
+	if err := r.store.UpdatePhase(proj.ID, cmd.Message); err != nil {
+		r.respond(channelID, threadTS, messageTS, fmt.Sprintf("⚠️ %s", err.Error()))
+		return
+	}
+
+	r.respond(channelID, threadTS, messageTS, fmt.Sprintf("📍 Phase updated to `%s` for project `%s`.", cmd.Message, cmd.Slug))
+
+	_ = r.store.AddEvent(&ProjectEvent{
+		ProjectID: proj.ID,
+		EventType: "phase_updated",
+		ActorID:   userID,
+		Summary:   fmt.Sprintf("Phase updated to %s", cmd.Message),
+	})
 }
 
 func (r *Router) handleResume(channelID, userID, threadTS, messageTS string, cmd *ProjectCommand) {
