@@ -2,6 +2,7 @@ package mgmt
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -11,11 +12,17 @@ import (
 	"github.com/p-blackswan/platform-agent/internal/project"
 )
 
+// SlackPoster can post messages to Slack.
+type SlackPoster interface {
+	PostMessage(channel, text, threadTS string) (string, error)
+}
+
 // ProjectHandlers holds dependencies for project API handlers.
 type ProjectHandlers struct {
 	store   *project.Store
 	manager *project.Manager
 	driver  *project.Driver
+	poster  SlackPoster
 	logger  zerolog.Logger
 }
 
@@ -31,6 +38,11 @@ func NewProjectHandlers(store *project.Store, manager *project.Manager, logger z
 // SetDriver sets the auto-drive engine.
 func (h *ProjectHandlers) SetDriver(d *project.Driver) {
 	h.driver = d
+}
+
+// SetPoster sets the Slack poster for notifications.
+func (h *ProjectHandlers) SetPoster(p SlackPoster) {
+	h.poster = p
 }
 
 // RegisterRoutes registers project API routes on the given fiber group.
@@ -394,11 +406,27 @@ func (h *ProjectHandlers) UpdatePhase(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"error": "phase is required"})
 	}
 
+	oldPhase := p.CurrentPhase
+
 	if err := h.store.UpdatePhase(p.ID, req.Phase); err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 	}
 
-	return c.JSON(fiber.Map{"phase": req.Phase})
+	// Record phase transition event
+	_ = h.store.AddEvent(&project.ProjectEvent{
+		ProjectID: p.ID,
+		EventType: "phase_updated",
+		ActorID:   "api",
+		Summary:   fmt.Sprintf("Phase: %s → %s", oldPhase, req.Phase),
+	})
+
+	// Notify report channel if auto-drive active
+	if p.AutoDrive && p.ReportChannelID != "" && h.poster != nil {
+		msg := fmt.Sprintf("📍 *Phase Complete: `%s` → `%s`*\nProject: `%s`", oldPhase, req.Phase, slug)
+		_, _ = h.poster.PostMessage(p.ReportChannelID, msg, p.ReportThreadTS)
+	}
+
+	return c.JSON(fiber.Map{"phase": req.Phase, "previous": oldPhase})
 }
 
 func contains(s, sub string) bool {

@@ -397,6 +397,7 @@ func main() {
 				projectDriver := project.NewDriver(projectStore, projectManager, safBridge, slackPoster, logger)
 				projectRouter.SetDriver(projectDriver)
 				projectHandlers.SetDriver(projectDriver)
+				projectHandlers.SetPoster(slackPoster)
 
 				// Restore auto-drive projects from DB
 				projectDriver.RestoreDriving()

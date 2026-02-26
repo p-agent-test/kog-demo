@@ -451,6 +451,8 @@ func (r *Router) handlePhase(channelID, userID, threadTS, messageTS string, cmd 
 		return
 	}
 
+	oldPhase := proj.CurrentPhase
+
 	if err := r.store.UpdatePhase(proj.ID, cmd.Message); err != nil {
 		r.respond(channelID, threadTS, messageTS, fmt.Sprintf("⚠️ %s", err.Error()))
 		return
@@ -464,6 +466,13 @@ func (r *Router) handlePhase(channelID, userID, threadTS, messageTS string, cmd 
 		ActorID:   userID,
 		Summary:   fmt.Sprintf("Phase updated to %s", cmd.Message),
 	})
+
+	// Trigger phase completion report if auto-drive is active
+	if proj.AutoDrive && r.driver != nil && proj.ReportChannelID != "" {
+		report := fmt.Sprintf("📍 *Phase Transition: `%s` → `%s`*\nProject: `%s`\n\nProvide a summary of what was accomplished in the `%s` phase.",
+			oldPhase, cmd.Message, proj.Slug, oldPhase)
+		r.bridge.HandleMessageWithSession(context.Background(), proj.ReportChannelID, "auto-drive", report, proj.ReportThreadTS, "", proj.ActiveSession)
+	}
 }
 
 func (r *Router) handleResume(channelID, userID, threadTS, messageTS string, cmd *ProjectCommand) {
