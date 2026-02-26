@@ -374,6 +374,7 @@ func main() {
 			threadProvider := bridge.NewSlackThreadProvider(slackApp, botUserID)
 			if wsBridge, ok := slackBridge.(*bridge.WSBridge); ok {
 				wsBridge.SetThreadHistoryProvider(threadProvider)
+				wsBridge.SetProjectContext(project.NewContextProvider(projectStore, projectManager))
 			} else if cliBridge, ok := slackBridge.(*bridge.Bridge); ok {
 				cliBridge.SetThreadHistoryProvider(threadProvider)
 			}

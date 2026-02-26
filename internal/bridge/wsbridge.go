@@ -183,6 +183,7 @@ type WSBridge struct {
 	logger          zerolog.Logger
 	historyProvider ThreadHistoryProvider
 	warmTracker     *WarmTracker
+	projectContext  ProjectContextProvider // optional, nil = no project context
 
 	// Embed Bridge for thread tracking and IsActiveThread
 	*Bridge
@@ -267,6 +268,11 @@ func (b *WSBridge) SetThreadHistoryProvider(p ThreadHistoryProvider) {
 	b.historyProvider = p
 }
 
+// SetProjectContext sets the provider for auto-injecting project context on cold sessions.
+func (b *WSBridge) SetProjectContext(pc ProjectContextProvider) {
+	b.projectContext = pc
+}
+
 // HandleMessageWithSession processes a message with an explicit session key (for project routing).
 func (b *WSBridge) HandleMessageWithSession(ctx context.Context, channelID, userID, text, threadTS, messageTS, sessionKey string) {
 	b.handleMessageInternal(ctx, channelID, userID, text, threadTS, messageTS, sessionKey)
@@ -328,17 +334,40 @@ func (b *WSBridge) handleMessageInternal(ctx context.Context, channelID, userID,
 			}
 		}
 
-		// Auto-inject thread history on cold sessions
+		// Auto-inject project context + thread history on cold sessions
 		messageToSend := text
-		if threadTS != "" && b.historyProvider != nil && !b.warmTracker.IsWarm(sessionKey) {
-			history, histErr := b.historyProvider.GetThreadHistory(channelID, threadTS, maxHistoryMessages)
-			if histErr != nil {
-				b.logger.Warn().Err(histErr).Str("thread", threadTS).Msg("failed to fetch thread history")
-			} else {
-				formatted := FormatThreadHistory(history, messageTS)
-				if formatted != "" {
-					messageToSend = formatted + "\n\n" + text
+		if !b.warmTracker.IsWarm(sessionKey) {
+			var contextParts []string
+
+			// 1. Project context (decisions, blockers, cross-project index)
+			if b.projectContext != nil {
+				var projCtx string
+				if threadTS != "" {
+					projCtx = b.projectContext.GetProjectContextForThread(channelID, threadTS)
 				}
+				if projCtx == "" {
+					projCtx = b.projectContext.GetProjectContextForSession(sessionKey)
+				}
+				if projCtx != "" {
+					contextParts = append(contextParts, projCtx)
+				}
+			}
+
+			// 2. Thread history
+			if threadTS != "" && b.historyProvider != nil {
+				history, histErr := b.historyProvider.GetThreadHistory(channelID, threadTS, maxHistoryMessages)
+				if histErr != nil {
+					b.logger.Warn().Err(histErr).Str("thread", threadTS).Msg("failed to fetch thread history")
+				} else {
+					formatted := FormatThreadHistory(history, messageTS)
+					if formatted != "" {
+						contextParts = append(contextParts, formatted)
+					}
+				}
+			}
+
+			if len(contextParts) > 0 {
+				messageToSend = strings.Join(contextParts, "\n\n---\n\n") + "\n\n" + text
 			}
 		}
 		b.warmTracker.MarkWarm(sessionKey)
