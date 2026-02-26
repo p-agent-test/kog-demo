@@ -11,13 +11,19 @@ import (
 	"github.com/p-blackswan/platform-agent/internal/store"
 )
 
+// ProjectSessionResolver resolves session keys from thread bindings.
+type ProjectSessionResolver interface {
+	GetSessionKeyByThread(channel, threadTS string) string
+}
+
 // Handlers holds dependencies for HTTP handlers.
 type Handlers struct {
-	engine         *TaskEngine
-	checker        *health.Checker
+	engine          *TaskEngine
+	checker         *health.Checker
 	sessionCtxStore *SessionContextStore
-	logger         zerolog.Logger
-	startTime      time.Time
+	projectResolver ProjectSessionResolver
+	logger          zerolog.Logger
+	startTime       time.Time
 
 	// Runtime config (mutable)
 	runtimeConfig *RuntimeConfig
@@ -45,6 +51,11 @@ func NewHandlers(engine *TaskEngine, checker *health.Checker, sessionCtx *Sessio
 		startTime:       time.Now(),
 		runtimeConfig:   rtCfg,
 	}
+}
+
+// SetProjectResolver sets the project session resolver for auto-drive policy.
+func (h *Handlers) SetProjectResolver(r ProjectSessionResolver) {
+	h.projectResolver = r
 }
 
 // SetSessionContextStore updates the session context store with SQLite backend
@@ -92,28 +103,17 @@ func (h *Handlers) SubmitTask(c *fiber.Ctx) error {
 				Msg("auto-resolved response routing from session context")
 		}
 
-		// Resolve session_key by thread — exact match, safe for multi-project
-		if req.SessionKey == "" {
-			thread := req.ResponseThread
-			if thread == "" {
-				// Try extracting from params
-				var embedded struct {
-					ResponseThread string `json:"response_thread"`
-				}
-				if len(req.Params) > 0 {
-					_ = json.Unmarshal(req.Params, &embedded)
-					thread = embedded.ResponseThread
-				}
-			}
-			if thread != "" {
-				if sctx := h.sessionCtxStore.GetByThread(req.ResponseChannel, thread); sctx != nil {
-					req.SessionKey = sctx.SessionID
-					h.logger.Debug().
-						Str("thread", thread).
-						Str("resolved_session_key", sctx.SessionID).
-						Msg("auto-resolved session_key from thread binding")
-				}
-			}
+	}
+
+	// Resolve session_key from project thread binding (SQLite — exact match, multi-project safe)
+	if req.SessionKey == "" && h.projectResolver != nil && req.ResponseChannel != "" && req.ResponseThread != "" {
+		if sk := h.projectResolver.GetSessionKeyByThread(req.ResponseChannel, req.ResponseThread); sk != "" {
+			req.SessionKey = sk
+			h.logger.Debug().
+				Str("channel", req.ResponseChannel).
+				Str("thread", req.ResponseThread).
+				Str("session_key", sk).
+				Msg("resolved session_key from project thread binding")
 		}
 	}
 

@@ -278,6 +278,9 @@ func main() {
 	projectHandlers := mgmt.NewProjectHandlers(projectStore, projectManager, logger)
 	projectHandlers.RegisterRoutes(mgmtServer.V1Group())
 
+	// Wire project session resolver for auto-drive policy
+	mgmtServer.SetProjectResolver(project.NewSessionResolver(projectStore))
+
 	// Start HTTP server
 	wg.Add(1)
 	go func() {

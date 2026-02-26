@@ -79,6 +79,13 @@ func (s *Server) SetSessionContextStore(ds *store.Store) {
 	}
 }
 
+// SetProjectResolver sets the project session resolver for auto-drive policy.
+func (s *Server) SetProjectResolver(r ProjectSessionResolver) {
+	if s.handlers != nil {
+		s.handlers.SetProjectResolver(r)
+	}
+}
+
 func (s *Server) setupMiddleware(cfg ServerConfig, logger zerolog.Logger) {
 	// Recovery middleware
 	s.app.Use(recover.New(recover.Config{
