@@ -97,8 +97,9 @@ func (a *Agent) executeGHExec(ctx context.Context, params json.RawMessage) (json
 		return nil, fmt.Errorf("invalid params: %w", err)
 	}
 
-	// Inject task ID from context (set by task engine) for approval tracking
+	// Inject task ID and session key from context (set by task engine)
 	p.taskID = mgmt.TaskIDFromContext(ctx)
+	sessionKey := mgmt.SessionKeyFromContext(ctx)
 
 	if p.Operation == "" {
 		return nil, fmt.Errorf("operation is required")
@@ -108,6 +109,46 @@ func (a *Agent) executeGHExec(ctx context.Context, params json.RawMessage) (json
 		return nil, fmt.Errorf("GitHub client is not configured")
 	}
 
+	// Auto-drive policy check — bypass normal approval for safe operations
+	if sessionKey != "" && a.isAutoDriveSession(sessionKey) {
+		adPolicy := getAutoDrivePolicy(p.Operation, p.Params)
+		slug := slugFromSessionKey(sessionKey)
+		switch adPolicy {
+		case adPolicyAutoApprove:
+			branch := extractBranch(p.Params)
+			a.logger.Info().
+				Str("operation", p.Operation).
+				Str("branch", branch).
+				Str("project", slug).
+				Msg("[AUTO-DRIVE] Auto-approved operation")
+			a.audit.Record(models.AuditEntry{
+				UserID:   p.CallerID,
+				Action:   "github.exec",
+				Resource: p.Operation,
+				Result:   "auto_drive_approved",
+				Details:  fmt.Sprintf("project=%s, branch=%s", slug, branch),
+			})
+			// Skip permission check, fall through to execution
+			goto execute
+		case adPolicyDeny:
+			a.logger.Warn().
+				Str("operation", p.Operation).
+				Str("project", slug).
+				Msg("[AUTO-DRIVE] DENIED — autonomous mode requires feature branches")
+			a.audit.Record(models.AuditEntry{
+				UserID:   p.CallerID,
+				Action:   "github.exec",
+				Resource: p.Operation,
+				Result:   "auto_drive_denied",
+				Details:  fmt.Sprintf("project=%s — direct commits to main/master not allowed", slug),
+			})
+			return nil, fmt.Errorf("Direct commits to main/master are not allowed in autonomous mode. Use a feature branch.")
+		case adPolicyRequireApproval:
+			// Fall through to normal approval flow
+		}
+	}
+
+	{
 	class := classifyOperation(p.Operation)
 
 	switch class {
@@ -176,7 +217,9 @@ func (a *Agent) executeGHExec(ctx context.Context, params json.RawMessage) (json
 	case classRead:
 		a.logger.Debug().Str("operation", p.Operation).Msg("auto-approved read operation")
 	}
+	} // end permission check block
 
+execute:
 	// Extract owner from params to select correct org client
 	owner := extractOwner(p.Params)
 	if owner == "" {

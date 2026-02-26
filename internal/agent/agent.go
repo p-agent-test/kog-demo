@@ -17,6 +17,7 @@ import (
 
 	ghclient "github.com/p-blackswan/platform-agent/internal/github"
 	jiraclient "github.com/p-blackswan/platform-agent/internal/jira"
+	"github.com/p-blackswan/platform-agent/internal/project"
 	"github.com/p-blackswan/platform-agent/internal/metrics"
 	"github.com/p-blackswan/platform-agent/internal/mgmt"
 	"github.com/p-blackswan/platform-agent/internal/models"
@@ -61,8 +62,9 @@ type Agent struct {
 	audit      *supervisor.AuditLog
 	metrics    *metrics.Metrics
 	contexts   *ContextStore
-	dataStore  *store.Store // optional SQLite backend
-	logger     zerolog.Logger
+	dataStore    *store.Store    // optional SQLite backend
+	projectStore *project.Store // project store for auto-drive detection
+	logger       zerolog.Logger
 
 	// Approval flow
 	pendingMu        sync.RWMutex

@@ -144,8 +144,9 @@ Instructions:
 - Use sub-agents for implementation work
 - Record decisions with structured output
 - If blocked, report the blocker
-- Do NOT wait for user input — keep working autonomously`,
-		p.Name, p.CurrentPhase, p.CurrentPhase, p.Phases)
+- Do NOT wait for user input — keep working autonomously
+- Branch naming: project/%s/{description} (NEVER commit directly to main/master)`,
+		p.Name, p.CurrentPhase, p.CurrentPhase, p.Phases, p.Slug)
 
 	d.logger.Info().Str("project", p.Slug).Str("phase", p.CurrentPhase).Msg("sending drive nudge")
 

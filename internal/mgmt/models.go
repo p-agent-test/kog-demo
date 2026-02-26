@@ -35,6 +35,7 @@ type Task struct {
 	ResponseChannel string          `json:"response_channel,omitempty"`
 	ResponseThread  string          `json:"response_thread,omitempty"`
 	ProjectID       string          `json:"project_id,omitempty"`
+	SessionKey      string          `json:"session_key,omitempty"`
 	CreatedAt       time.Time       `json:"created_at"`
 	StartedAt       *time.Time      `json:"started_at,omitempty"`
 	CompletedAt     *time.Time      `json:"completed_at,omitempty"`
@@ -83,6 +84,7 @@ type SubmitTaskRequest struct {
 	ResponseChannel string          `json:"response_channel,omitempty"`
 	ResponseThread  string          `json:"response_thread,omitempty"`
 	ProjectID       string          `json:"project_id,omitempty"`
+	SessionKey      string          `json:"session_key,omitempty"`
 	TTLSeconds      int             `json:"ttl_seconds,omitempty"`
 }
 

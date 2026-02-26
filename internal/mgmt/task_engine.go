@@ -23,9 +23,20 @@ const TaskIDContextKey contextKey = "task_id"
 // ProjectIDContextKey is the context key for passing project ID to executors.
 const ProjectIDContextKey contextKey = "project_id"
 
+// SessionKeyContextKey is the context key for passing session key to executors.
+const SessionKeyContextKey contextKey = "session_key"
+
 // ProjectIDFromContext extracts the project ID from context.
 func ProjectIDFromContext(ctx context.Context) string {
 	if v, ok := ctx.Value(ProjectIDContextKey).(string); ok {
+		return v
+	}
+	return ""
+}
+
+// SessionKeyFromContext extracts the session key from context.
+func SessionKeyFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(SessionKeyContextKey).(string); ok {
 		return v
 	}
 	return ""
@@ -147,6 +158,7 @@ func (te *TaskEngine) Submit(req SubmitTaskRequest) (*Task, error) {
 		ResponseChannel: req.ResponseChannel,
 		ResponseThread:  req.ResponseThread,
 		ProjectID:       req.ProjectID,
+		SessionKey:      req.SessionKey,
 		CreatedAt:       time.Now().UTC(),
 	}
 
@@ -446,6 +458,9 @@ func (te *TaskEngine) executeTask(ctx context.Context, task *Task, log zerolog.L
 	defer taskCancel()
 
 	taskCtx = context.WithValue(taskCtx, TaskIDContextKey, task.ID)
+	if task.SessionKey != "" {
+		taskCtx = context.WithValue(taskCtx, SessionKeyContextKey, task.SessionKey)
+	}
 	if task.ProjectID != "" {
 		taskCtx = context.WithValue(taskCtx, ProjectIDContextKey, task.ProjectID)
 	}
