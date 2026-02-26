@@ -105,15 +105,29 @@ func (h *Handlers) SubmitTask(c *fiber.Ctx) error {
 
 	}
 
-	// Resolve session_key from project thread binding (SQLite — exact match, multi-project safe)
-	if req.SessionKey == "" && h.projectResolver != nil && req.ResponseChannel != "" && req.ResponseThread != "" {
-		if sk := h.projectResolver.GetSessionKeyByThread(req.ResponseChannel, req.ResponseThread); sk != "" {
-			req.SessionKey = sk
-			h.logger.Debug().
-				Str("channel", req.ResponseChannel).
-				Str("thread", req.ResponseThread).
-				Str("session_key", sk).
-				Msg("resolved session_key from project thread binding")
+	// Resolve session_key — try project thread binding first, then session context store
+	if req.SessionKey == "" && req.ResponseChannel != "" && req.ResponseThread != "" {
+		// Strategy 1: project store (thread_sessions table — exact match)
+		if h.projectResolver != nil {
+			if sk := h.projectResolver.GetSessionKeyByThread(req.ResponseChannel, req.ResponseThread); sk != "" {
+				req.SessionKey = sk
+				h.logger.Debug().
+					Str("channel", req.ResponseChannel).
+					Str("thread", req.ResponseThread).
+					Str("session_key", sk).
+					Msg("resolved session_key from project thread binding")
+			}
+		}
+		// Strategy 2: session context store (session_contexts table — fallback)
+		if req.SessionKey == "" && h.sessionCtxStore != nil {
+			if sctx := h.sessionCtxStore.GetByThread(req.ResponseChannel, req.ResponseThread); sctx != nil {
+				req.SessionKey = sctx.SessionID
+				h.logger.Debug().
+					Str("channel", req.ResponseChannel).
+					Str("thread", req.ResponseThread).
+					Str("session_key", sctx.SessionID).
+					Msg("resolved session_key from session context store (fallback)")
+			}
 		}
 	}
 
