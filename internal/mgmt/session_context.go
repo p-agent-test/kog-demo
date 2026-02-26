@@ -124,6 +124,48 @@ func (s *SessionContextStore) Resolve(callerID string) *SessionContext {
 	return latest
 }
 
+// GetByThread finds the session context for a specific channel+thread combination.
+// This is an exact match — safe for multi-project scenarios.
+func (s *SessionContextStore) GetByThread(channel, threadTS string) *SessionContext {
+	if channel == "" || threadTS == "" {
+		return nil
+	}
+
+	// Check in-memory cache first
+	s.mu.RLock()
+	now := time.Now()
+	for _, ctx := range s.contexts {
+		if s.ttl > 0 && now.Sub(time.UnixMilli(ctx.UpdatedAt)) > s.ttl {
+			continue
+		}
+		if ctx.Channel == channel && ctx.ThreadTS == threadTS {
+			s.mu.RUnlock()
+			return ctx
+		}
+	}
+	s.mu.RUnlock()
+
+	// Cold start: try SQLite
+	if s.store != nil {
+		sc, err := s.store.GetSessionContextByThread(channel, threadTS)
+		if err == nil && sc != nil {
+			sCtx := &SessionContext{
+				SessionID: sc.SessionID,
+				Channel:   sc.Channel,
+				ThreadTS:  sc.ThreadTS,
+				UpdatedAt: sc.LastUsed,
+			}
+			// Cache it
+			s.mu.Lock()
+			s.contexts[sc.SessionID] = sCtx
+			s.mu.Unlock()
+			return sCtx
+		}
+	}
+
+	return nil
+}
+
 // Cleanup removes expired entries.
 func (s *SessionContextStore) Cleanup() {
 	s.mu.Lock()

@@ -85,15 +85,35 @@ func (h *Handlers) SubmitTask(c *fiber.Ctx) error {
 				req.ResponseChannel = sctx.Channel
 				req.ResponseThread = sctx.ThreadTS
 			}
-			if req.SessionKey == "" {
-				req.SessionKey = sctx.SessionID
-			}
 			h.logger.Debug().
 				Str("caller_id", req.CallerID).
 				Str("resolved_channel", sctx.Channel).
 				Str("resolved_thread", sctx.ThreadTS).
-				Str("resolved_session_key", sctx.SessionID).
-				Msg("auto-resolved context from session store")
+				Msg("auto-resolved response routing from session context")
+		}
+
+		// Resolve session_key by thread — exact match, safe for multi-project
+		if req.SessionKey == "" {
+			thread := req.ResponseThread
+			if thread == "" {
+				// Try extracting from params
+				var embedded struct {
+					ResponseThread string `json:"response_thread"`
+				}
+				if len(req.Params) > 0 {
+					_ = json.Unmarshal(req.Params, &embedded)
+					thread = embedded.ResponseThread
+				}
+			}
+			if thread != "" {
+				if sctx := h.sessionCtxStore.GetByThread(req.ResponseChannel, thread); sctx != nil {
+					req.SessionKey = sctx.SessionID
+					h.logger.Debug().
+						Str("thread", thread).
+						Str("resolved_session_key", sctx.SessionID).
+						Msg("auto-resolved session_key from thread binding")
+				}
+			}
 		}
 	}
 
