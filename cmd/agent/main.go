@@ -272,6 +272,7 @@ func main() {
 	// Initialize project subsystem
 	projectStore := project.NewStore(dataStore, logger)
 	projectManager := project.NewManager(projectStore, logger)
+	agentInstance.SetProjectStore(projectStore)
 
 	// Register project API routes
 	projectHandlers := mgmt.NewProjectHandlers(projectStore, projectManager, logger)

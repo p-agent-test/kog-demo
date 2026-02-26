@@ -307,6 +307,23 @@ func (r *Router) handleDrive(channelID, userID, threadTS, messageTS string, cmd 
 		return
 	}
 
+	// Auto-bind thread + inject project preamble if not already bound
+	replyThread := threadTS
+	if replyThread == "" {
+		replyThread = messageTS
+	}
+	if replyThread != "" {
+		existing, _ := r.store.GetProjectByThread(channelID, replyThread)
+		if existing == nil {
+			_ = r.store.BindThread(channelID, replyThread, proj.ID, proj.ActiveSession)
+			// Send preamble to initialize the session with project context
+			preamble, err := r.manager.BuildContextPreamble(proj)
+			if err == nil && preamble != "" {
+				r.bridge.HandleMessageWithSession(context.Background(), channelID, userID, preamble, threadTS, messageTS, proj.ActiveSession)
+			}
+		}
+	}
+
 	// Parse intervals
 	driveMs := proj.DriveIntervalMs
 	if cmd.DriveInterval != "" {
