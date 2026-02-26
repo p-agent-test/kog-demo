@@ -241,9 +241,9 @@ func (sm *streamingMessage) update(text string, isFinal bool) {
 		return
 	}
 
-	displayText := text
+	displayText := formatForSlack(text)
 	if !isFinal {
-		displayText = text + " ▍" // typing indicator
+		displayText = displayText + " ▍" // typing indicator
 	}
 
 	if sm.messageTS == "" {
@@ -381,7 +381,7 @@ func (b *WSBridge) handleMessageInternal(ctx context.Context, channelID, userID,
 				sm.update(chunks[0], true)
 				for _, chunk := range chunks[1:] {
 					time.Sleep(300 * time.Millisecond)
-					b.poster.PostMessage(channelID, chunk, replyThread)
+					b.poster.PostMessage(channelID, formatForSlack(chunk), replyThread)
 				}
 			}
 		}
