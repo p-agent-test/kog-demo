@@ -150,7 +150,7 @@ Instructions:
 
 	d.logger.Info().Str("project", p.Slug).Str("phase", p.CurrentPhase).Msg("sending drive nudge")
 
-	d.bridge.HandleMessageWithSession(ctx, "", "auto-drive", nudge, "", "", p.ActiveSession)
+	d.bridge.HandleMessageWithSession(ctx, p.ReportChannelID, "auto-drive", nudge, p.ReportThreadTS, "", p.ActiveSession)
 
 	_ = d.store.TouchProject(p.Slug)
 }
