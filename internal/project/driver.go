@@ -134,10 +134,28 @@ func (d *Driver) driveTick(ctx context.Context, projectID string) {
 		return
 	}
 
+	// Extract repo name from URL for local path hint
+	repoLocalPath := ""
+	if p.RepoURL != "" {
+		parts := strings.Split(strings.TrimSuffix(p.RepoURL, ".git"), "/")
+		if len(parts) > 0 {
+			repoLocalPath = parts[len(parts)-1]
+		}
+	}
+
+	localPathHint := ""
+	if repoLocalPath != "" {
+		localPathHint = fmt.Sprintf(`
+Repo: %s
+Local path: ~/workspace/%s (ALREADY CLONED — read/write files directly, do NOT use git.get-file API)`, p.RepoURL, repoLocalPath)
+	} else if p.RepoURL != "" {
+		localPathHint = fmt.Sprintf("\nRepo: %s", p.RepoURL)
+	}
+
 	nudge := fmt.Sprintf(`[AUTO-DRIVE] Project: %s | Phase: %s
 You are autonomously working on this project. Continue from where you left off.
 Current phase: %s
-All phases: %s
+All phases: %s%s
 
 Instructions:
 - If current phase is complete, update phase and move to next
@@ -145,8 +163,10 @@ Instructions:
 - Record decisions with structured output
 - If blocked, report the blocker
 - Do NOT wait for user input — keep working autonomously
+- Read/write files LOCALLY (do not use git API for file access)
+- Use git.commit and git.create-branch for git operations only
 - Branch naming: project/%s/{description} (NEVER commit directly to main/master)`,
-		p.Name, p.CurrentPhase, p.CurrentPhase, p.Phases, p.Slug)
+		p.Name, p.CurrentPhase, p.CurrentPhase, p.Phases, localPathHint, p.Slug)
 
 	d.logger.Info().Str("project", p.Slug).Str("phase", p.CurrentPhase).Msg("sending drive nudge")
 
