@@ -21,6 +21,7 @@ const (
 	CmdDrive
 	CmdPause
 	CmdPhase
+	CmdReport
 )
 
 // ProjectCommand represents a parsed project command.
@@ -105,6 +106,17 @@ func ParseCommand(text string) *ProjectCommand {
 	case "phase":
 		if len(parts) >= 3 {
 			return &ProjectCommand{Type: CmdPhase, Slug: strings.ToLower(parts[1]), Message: parts[2]}
+		}
+		return nil
+
+	case "report":
+		// report <slug> [interval]
+		if len(parts) >= 2 {
+			cmd := &ProjectCommand{Type: CmdReport, Slug: strings.ToLower(parts[1])}
+			if len(parts) >= 3 {
+				cmd.ReportInterval = parts[2]
+			}
+			return cmd
 		}
 		return nil
 	}

@@ -120,6 +120,10 @@ func (r *Router) HandleMessage(ctx context.Context, channelID, userID, text, thr
 			r.handlePhase(channelID, userID, threadTS, messageTS, cmd)
 			return
 
+		case CmdReport:
+			r.handleReport(channelID, userID, threadTS, messageTS, cmd)
+			return
+
 		case CmdContinueProject, CmdMessageProject:
 			// Check if slug matches a known project
 			proj, _ := r.store.GetProject(cmd.Slug)
@@ -473,6 +477,60 @@ func (r *Router) handlePhase(channelID, userID, threadTS, messageTS string, cmd 
 			oldPhase, cmd.Message, proj.Slug, oldPhase)
 		r.bridge.HandleMessageWithSession(context.Background(), proj.ReportChannelID, "auto-drive", report, proj.ReportThreadTS, "", proj.ActiveSession)
 	}
+}
+
+func (r *Router) handleReport(channelID, userID, threadTS, messageTS string, cmd *ProjectCommand) {
+	proj, _ := r.store.GetProject(cmd.Slug)
+	if proj == nil {
+		r.respond(channelID, threadTS, messageTS, fmt.Sprintf("Project `%s` not found.", cmd.Slug))
+		return
+	}
+
+	// If interval provided, update report interval
+	if cmd.ReportInterval != "" {
+		ms, err := DurationToMs(cmd.ReportInterval)
+		if err != nil {
+			r.respond(channelID, threadTS, messageTS, fmt.Sprintf("⚠️ Invalid interval: %s", cmd.ReportInterval))
+			return
+		}
+
+		if err := r.store.UpdateAutoDrive(proj.ID, proj.AutoDrive, proj.DriveIntervalMs, ms,
+			proj.ReportChannelID, proj.ReportThreadTS, proj.CurrentPhase, proj.Phases, proj.AutoDriveUntil); err != nil {
+			r.respond(channelID, threadTS, messageTS, fmt.Sprintf("⚠️ %s", err.Error()))
+			return
+		}
+
+		// Restart driver with new interval if active
+		if proj.AutoDrive && r.driver != nil {
+			updated, _ := r.store.GetProjectByID(proj.ID)
+			if updated != nil {
+				r.driver.StartDriving(updated)
+			}
+		}
+
+		r.respond(channelID, threadTS, messageTS, fmt.Sprintf("📊 Report interval updated to `%s` for `%s`.", FormatDurationMs(ms), cmd.Slug))
+		return
+	}
+
+	// No interval → trigger immediate report
+	if !proj.AutoDrive {
+		r.respond(channelID, threadTS, messageTS, fmt.Sprintf("Project `%s` is not in auto-drive mode.", cmd.Slug))
+		return
+	}
+
+	prompt := fmt.Sprintf(`[STATUS-REPORT] Provide a brief status update for project %s.
+Format:
+📊 Phase: %s
+✅ Done: (what you completed)
+🔨 Working: (what you're doing now)
+🚧 Blockers: (any blockers)
+⏭️ Next: (what's next)`, proj.Name, proj.CurrentPhase)
+
+	replyThread := threadTS
+	if replyThread == "" {
+		replyThread = messageTS
+	}
+	r.bridge.HandleMessageWithSession(context.Background(), channelID, userID, prompt, replyThread, "", proj.ActiveSession)
 }
 
 func (r *Router) handleResume(channelID, userID, threadTS, messageTS string, cmd *ProjectCommand) {
