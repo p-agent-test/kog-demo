@@ -20,6 +20,7 @@ import (
 	"github.com/p-blackswan/platform-agent/internal/metrics"
 	"github.com/p-blackswan/platform-agent/internal/mgmt"
 	"github.com/p-blackswan/platform-agent/internal/models"
+	slackblocks "github.com/p-blackswan/platform-agent/internal/slack"
 	"github.com/p-blackswan/platform-agent/internal/store"
 	"github.com/p-blackswan/platform-agent/internal/supervisor"
 )
@@ -42,6 +43,8 @@ type pendingApprovalInfo struct {
 	Permission supervisor.Permission
 	Action     string
 	Resource   string
+	Operation  string // e.g. "pr.create" — for richer log messages
+	Details    string // short summary for approve/deny messages
 	ChannelID  string // supervisor channel where buttons were posted
 	ThreadTS   string // messageTS of the approval buttons message (used as thread parent)
 }
@@ -184,8 +187,12 @@ func (a *Agent) OnApproval(requestID, approverID string, approved bool) {
 			Msg("approval denied — task will remain failed")
 
 		if a.slack != nil && replyChannel != "" {
+			summary := info.Details
+			if summary == "" {
+				summary = fmt.Sprintf("`%s` on `%s`", info.Action, info.Resource)
+			}
 			_, _, _ = a.slack.PostMessage(replyChannel,
-				replyOpts(fmt.Sprintf("❌ *Denied* `%s` on `%s` (by <@%s>)", info.Action, info.Resource, approverID))...)
+				replyOpts(fmt.Sprintf("❌ *Denied* %s (by <@%s>)", summary, approverID))...)
 		}
 		return
 	}
@@ -212,9 +219,13 @@ func (a *Agent) OnApproval(requestID, approverID string, approved bool) {
 	}
 
 	if a.slack != nil && replyChannel != "" {
+		summary := info.Details
+		if summary == "" {
+			summary = fmt.Sprintf("`%s` on `%s`", info.Action, info.Resource)
+		}
 		_, _, _ = a.slack.PostMessage(replyChannel,
-			replyOpts(fmt.Sprintf("✅ *Approved & re-queued* `%s` on `%s` (by <@%s>)\nTask `%s` executing…",
-				info.Action, info.Resource, approverID, info.TaskID))...)
+			replyOpts(fmt.Sprintf("✅ *Approved & re-queued* %s (by <@%s>)\nTask `%s` executing…",
+				summary, approverID, info.TaskID))...)
 	}
 }
 
@@ -1306,30 +1317,11 @@ func safeRawJSON(raw json.RawMessage) json.RawMessage {
 
 // sendApprovalButtons sends interactive approval buttons to the supervisor channel.
 // Returns the channel and messageTS of the posted message (for threading follow-ups).
-func (a *Agent) sendApprovalButtons(channelID, threadTS, requestID, userID, action, resource string) (postedChannel, postedTS string) {
+func (a *Agent) sendApprovalButtons(channelID, threadTS, requestID string, actx slackblocks.ApprovalContext) (postedChannel, postedTS string) {
 	if a.slack == nil {
 		return "", ""
 	}
-	blocks := []slack.Block{
-		slack.NewSectionBlock(
-			slack.NewTextBlockObject("mrkdwn",
-				fmt.Sprintf("🔐 *Approval Required*\n*User:* <@%s>\n*Action:* %s\n*Resource:* %s\n*Task:* awaiting approval…",
-					userID, action, resource),
-				false, false),
-			nil, nil,
-		),
-		slack.NewActionBlock(
-			"approval_actions",
-			slack.NewButtonBlockElement(
-				fmt.Sprintf("approve_%s", requestID), "approve",
-				slack.NewTextBlockObject("plain_text", "✅ Approve", false, false),
-			),
-			slack.NewButtonBlockElement(
-				fmt.Sprintf("deny_%s", requestID), "deny",
-				slack.NewTextBlockObject("plain_text", "❌ Deny", false, false),
-			),
-		),
-	}
+	blocks := slackblocks.BuildApprovalBlocks(requestID, actx)
 
 	target := a.supervisorChannel
 	if target == "" {

@@ -9,6 +9,7 @@ import (
 	gh "github.com/google/go-github/v60/github"
 	"github.com/p-blackswan/platform-agent/internal/mgmt"
 	"github.com/p-blackswan/platform-agent/internal/models"
+	slackblocks "github.com/p-blackswan/platform-agent/internal/slack"
 	"github.com/p-blackswan/platform-agent/internal/supervisor"
 )
 
@@ -132,6 +133,13 @@ func (a *Agent) executeGHExec(ctx context.Context, params json.RawMessage) (json
 			}
 			// Register pending approval for re-queue on callback
 			reqID := ""
+			actx := slackblocks.ApprovalContext{
+				Action:    "github.exec",
+				Operation: p.Operation,
+				CallerID:  p.CallerID,
+				Params:    p.Params,
+				TaskID:    p.taskID,
+			}
 			if len(permResult.Pending) > 0 {
 				reqID = permResult.Pending[0].RequestID
 				a.registerPendingApproval(reqID, &pendingApprovalInfo{
@@ -140,11 +148,13 @@ func (a *Agent) executeGHExec(ctx context.Context, params json.RawMessage) (json
 					Permission: supervisor.PermGithubExecWrite,
 					Action:     "github.exec",
 					Resource:   p.Operation,
+					Operation:  p.Operation,
+					Details:    slackblocks.ApprovalSummary(actx),
 				})
 			}
 			// Send Slack buttons and capture thread for follow-ups
 			if a.slack != nil && a.supervisorChannel != "" {
-				postedCh, postedTS := a.sendApprovalButtons(a.supervisorChannel, "", reqID, p.CallerID, "github.exec", p.Operation)
+				postedCh, postedTS := a.sendApprovalButtons(a.supervisorChannel, "", reqID, actx)
 				// Update pending info with thread context
 				a.pendingMu.Lock()
 				if info, ok := a.pendingApprovals[reqID]; ok {
