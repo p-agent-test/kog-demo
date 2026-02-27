@@ -6,11 +6,38 @@ import (
 	"strings"
 )
 
+var (
+	// GitHub installation/app tokens: ghs_xxxxx
+	ghsTokenRe = regexp.MustCompile(`ghs_[A-Za-z0-9]{20,}`)
+	// GitHub personal access tokens: ghp_xxxxx, github_pat_xxxxx
+	ghpTokenRe = regexp.MustCompile(`gh[po]_[A-Za-z0-9_]{20,}`)
+	// GitHub fine-grained PATs
+	githubPatRe = regexp.MustCompile(`github_pat_[A-Za-z0-9_]{20,}`)
+	// x-access-token in URLs
+	accessTokenURLRe = regexp.MustCompile(`(https?://x-access-token:)[A-Za-z0-9_\-\.]+(@github\.com)`)
+	// Anthropic/OpenAI API keys
+	apiKeyRe = regexp.MustCompile(`sk-ant-[A-Za-z0-9_\-]{20,}`)
+)
+
+// redactSecrets removes sensitive tokens from text before posting to Slack.
+func redactSecrets(text string) string {
+	text = ghsTokenRe.ReplaceAllString(text, "ghs_***")
+	text = ghpTokenRe.ReplaceAllString(text, "ghp_***")
+	text = githubPatRe.ReplaceAllString(text, "github_pat_***")
+	text = accessTokenURLRe.ReplaceAllString(text, "${1}***${2}")
+	text = apiKeyRe.ReplaceAllString(text, "sk-ant-***")
+	return text
+}
+
 // formatForSlack converts standard Markdown to Slack mrkdwn format.
+// Also redacts sensitive tokens before posting.
 func formatForSlack(text string) string {
 	if text == "" {
 		return ""
 	}
+
+	// 0. Redact secrets — always first
+	text = redactSecrets(text)
 
 	// 1. Protect code blocks
 	var codeBlocks []string
