@@ -575,6 +575,30 @@ func (r *Router) OnProjectArchive(channelID, threadTS, userID, slug string) {
 	r.respond(channelID, threadTS, "", fmt.Sprintf("📦 Project `%s` archived.", slug))
 }
 
+func (r *Router) OnProjectResume(channelID, threadTS, userID, slug string) {
+	p, err := r.manager.ResumeProject(slug, userID)
+	if err != nil {
+		r.respond(channelID, threadTS, "", fmt.Sprintf("⚠️ %s", err.Error()))
+		return
+	}
+	r.respond(channelID, threadTS, "", fmt.Sprintf("♻️ Project `%s` resumed.", p.Slug))
+}
+
+func (r *Router) OnShowArchived(channelID, threadTS, userID string) {
+	projects, err := r.store.ListProjects("archived", "")
+	if err != nil {
+		r.respond(channelID, threadTS, "", "⚠️ Failed to list archived projects.")
+		return
+	}
+
+	blocks := ArchivedDashboardBlocks(projects)
+	fallback := fmt.Sprintf("📦 %d archived projects", len(projects))
+	if len(projects) == 0 {
+		fallback = "No archived projects."
+	}
+	r.respondBlocks(channelID, threadTS, threadTS, fallback, blocks...)
+}
+
 func (r *Router) handleContinueProject(ctx context.Context, channelID, userID, threadTS, messageTS string, proj *Project) {
 	// Build context preamble and send to project session
 	preamble, err := r.manager.BuildContextPreamble(proj)

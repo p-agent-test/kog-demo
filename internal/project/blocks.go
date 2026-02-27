@@ -169,6 +169,14 @@ func DashboardBlocks(projects []*Project, statsMap map[string]*ProjectStats, eve
 		))
 	}
 
+	blocks = append(blocks, slack.NewDividerBlock())
+	blocks = append(blocks, slack.NewActionBlock(
+		"project_footer_actions",
+		slack.NewButtonBlockElement(
+			"project_show_archived", "show_archived",
+			slack.NewTextBlockObject("plain_text", "📦 Show archived", false, false),
+		),
+	))
 	blocks = append(blocks, slack.NewContextBlock("",
 		slack.NewTextBlockObject("mrkdwn", "`<slug>` to continue · `new project \"Name\"` to create", false, false),
 	))
@@ -373,6 +381,47 @@ func ProjectStatusBlocks(p *Project, stats *ProjectStats, decisions []*ProjectMe
 		fmt.Sprintf("project_detail_actions_%s", p.Slug),
 		continueBtn, archiveBtn,
 	))
+
+	return blocks
+}
+
+// ArchivedDashboardBlocks builds blocks for the archived projects list.
+func ArchivedDashboardBlocks(projects []*Project) []slack.Block {
+	if len(projects) == 0 {
+		return []slack.Block{
+			slack.NewSectionBlock(
+				slack.NewTextBlockObject("mrkdwn", "📦 No archived projects.", false, false),
+				nil, nil,
+			),
+		}
+	}
+
+	blocks := []slack.Block{
+		slack.NewHeaderBlock(
+			slack.NewTextBlockObject("plain_text", fmt.Sprintf("📦 %d Archived Projects", len(projects)), false, false),
+		),
+	}
+
+	for i, p := range projects {
+		if i > 0 {
+			blocks = append(blocks, slack.NewDividerBlock())
+		}
+
+		archivedAt := timeAgo(p.UpdatedAt)
+		text := fmt.Sprintf("📦 *%s*\n_%s_ · Archived %s", p.Name, p.Slug, archivedAt)
+
+		resumeBtn := slack.NewButtonBlockElement(
+			fmt.Sprintf("project_resume_%s", p.Slug), p.Slug,
+			slack.NewTextBlockObject("plain_text", "♻️ Resume", false, false),
+		)
+
+		section := slack.NewSectionBlock(
+			slack.NewTextBlockObject("mrkdwn", text, false, false),
+			nil,
+			slack.NewAccessory(resumeBtn),
+		)
+		blocks = append(blocks, section)
+	}
 
 	return blocks
 }

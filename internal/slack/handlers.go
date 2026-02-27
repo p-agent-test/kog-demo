@@ -26,6 +26,8 @@ type ApprovalHandler interface {
 type ProjectInteractionHandler interface {
 	OnProjectContinue(channelID, threadTS, userID, slug string)
 	OnProjectArchive(channelID, threadTS, userID, slug string)
+	OnProjectResume(channelID, threadTS, userID, slug string)
+	OnShowArchived(channelID, threadTS, userID string)
 }
 
 // SessionCleanupHandler processes session cleanup button callbacks.
@@ -198,10 +200,19 @@ func (h *Handler) handleInteraction(ctx context.Context, evt socketmode.Event) {
 			if h.projectHandler != nil {
 				h.projectHandler.OnProjectArchive(callback.Channel.ID, callback.Message.Timestamp, callback.User.ID, slug)
 			}
+		case action.ActionID == "project_show_archived":
+			if h.projectHandler != nil {
+				h.projectHandler.OnShowArchived(callback.Channel.ID, callback.Message.Timestamp, callback.User.ID)
+			}
 		case strings.HasPrefix(action.ActionID, "project_start_"):
 			slug := strings.TrimPrefix(action.ActionID, "project_start_")
 			if h.projectHandler != nil {
 				h.projectHandler.OnProjectContinue(callback.Channel.ID, callback.Message.Timestamp, callback.User.ID, slug)
+			}
+		case strings.HasPrefix(action.ActionID, "project_resume_"):
+			slug := strings.TrimPrefix(action.ActionID, "project_resume_")
+			if h.projectHandler != nil {
+				h.projectHandler.OnProjectResume(callback.Channel.ID, callback.Message.Timestamp, callback.User.ID, slug)
 			}
 		case strings.HasPrefix(action.ActionID, "session_keep_"):
 			sessionKey := strings.TrimPrefix(action.ActionID, "session_keep_")
