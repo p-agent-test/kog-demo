@@ -66,6 +66,10 @@ type Agent struct {
 	projectStore *project.Store // project store for auto-drive detection
 	logger       zerolog.Logger
 
+	// Scoped tokens cache (repo.token results, never exposed to LLM)
+	mu           sync.Mutex
+	scopedTokens map[string]string // "owner/repo" → token
+
 	// Approval flow
 	pendingMu        sync.RWMutex
 	pendingApprovals map[string]*pendingApprovalInfo // requestID → info

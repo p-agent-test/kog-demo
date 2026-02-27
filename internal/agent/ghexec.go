@@ -829,14 +829,24 @@ func (a *Agent) ghRepoToken(_ context.Context, params json.RawMessage) (interfac
 		return nil, fmt.Errorf("creating scoped token: %w", err)
 	}
 
-	cloneURL := fmt.Sprintf("https://x-access-token:%s@github.com/%s/%s.git", scopedToken.Token, p.Owner, p.Repo)
+	// Store token internally — never expose in response
+
+	// Cache the token so git.commit and other ops can use it internally
+	a.mu.Lock()
+	if a.scopedTokens == nil {
+		a.scopedTokens = make(map[string]string)
+	}
+	repoKey := fmt.Sprintf("%s/%s", p.Owner, p.Repo)
+	a.scopedTokens[repoKey] = scopedToken.Token
+	a.mu.Unlock()
 
 	return map[string]interface{}{
-		"token":       scopedToken.Token,
+		"status":      "token_ready",
 		"expires_at":  scopedToken.ExpiresAt.Format("2006-01-02T15:04:05Z"),
 		"permissions": p.Permissions,
-		"repository":  fmt.Sprintf("%s/%s", p.Owner, p.Repo),
-		"clone_url":   cloneURL,
+		"repository":  repoKey,
+		"clone_url":   fmt.Sprintf("https://x-access-token:***@github.com/%s/%s.git", p.Owner, p.Repo),
+		"note":        "Token is cached internally. Use git.commit/git.create-branch directly — token will be applied automatically.",
 	}, nil
 }
 
