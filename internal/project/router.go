@@ -282,7 +282,7 @@ func (r *Router) handleBlocker(channelID, userID, threadTS, messageTS string, cm
 }
 
 func (r *Router) handleArchive(channelID, userID, threadTS, messageTS string, cmd *ProjectCommand) {
-	// Stop auto-drive if active
+	// Stop auto-drive ticker if active
 	proj, _ := r.store.GetProject(cmd.Slug)
 	if proj != nil && r.driver != nil {
 		r.driver.StopDriving(proj.ID)
@@ -292,6 +292,15 @@ func (r *Router) handleArchive(channelID, userID, threadTS, messageTS string, cm
 		r.respond(channelID, threadTS, messageTS, fmt.Sprintf("⚠️ %s", err.Error()))
 		return
 	}
+
+	// Send hard stop to the project session — prevents shadow auto-drive
+	// (session may be mid-work; this ensures Kog-2 stops and doesn't continue)
+	if proj != nil && proj.ActiveSession != "" {
+		stopMsg := fmt.Sprintf("[SYSTEM: Project `%s` has been ARCHIVED by %s. STOP all work immediately. Do not spawn new sub-agents, do not make further commits. Save your current state summary and halt.]",
+			proj.Slug, userID)
+		r.bridge.HandleMessageWithSession(context.Background(), channelID, userID, stopMsg, threadTS, messageTS, proj.ActiveSession)
+	}
+
 	r.respond(channelID, threadTS, messageTS, fmt.Sprintf("📦 Project `%s` archived.", cmd.Slug))
 }
 
