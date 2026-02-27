@@ -21,9 +21,10 @@ type Project struct {
 	ReportIntervalMs int64  `json:"report_interval_ms,omitempty"`
 	ReportChannelID  string `json:"report_channel_id,omitempty"`
 	ReportThreadTS   string `json:"report_thread_ts,omitempty"`
-	CurrentPhase     string `json:"current_phase,omitempty"`
-	Phases           string `json:"phases,omitempty"`
-	AutoDriveUntil   int64  `json:"auto_drive_until,omitempty"`
+	CurrentPhase     string            `json:"current_phase,omitempty"`
+	Phases           string            `json:"phases,omitempty"`
+	PhaseModels      map[string]string `json:"phase_models,omitempty"` // phase → model alias
+	AutoDriveUntil   int64             `json:"auto_drive_until,omitempty"`
 }
 
 // AutoDriveConfig holds parsed auto-drive configuration from user input.

@@ -2,6 +2,7 @@ package project
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -125,13 +126,14 @@ func (s *Store) GetProjectByID(id string) (*Project, error) {
 }
 
 // projectColumns is the standard column list for project queries.
-const projectColumns = `id, slug, name, description, repo_url, status, owner_id, active_session, session_version, created_at, updated_at, archived_at, auto_drive, drive_interval_ms, report_interval_ms, report_channel_id, report_thread_ts, current_phase, phases, auto_drive_until`
+const projectColumns = `id, slug, name, description, repo_url, status, owner_id, active_session, session_version, created_at, updated_at, archived_at, auto_drive, drive_interval_ms, report_interval_ms, report_channel_id, report_thread_ts, current_phase, phases, auto_drive_until, phase_models`
 
 func (s *Store) scanProject(query string, args ...interface{}) (*Project, error) {
 	p := &Project{}
 	var repoURL sql.NullString
 	var activeSession sql.NullString
 	var archivedAt sql.NullInt64
+	var phaseModelsJSON sql.NullString
 
 	err := s.ds.DB().QueryRow(query, args...).Scan(
 		&p.ID, &p.Slug, &p.Name, &p.Description, &repoURL,
@@ -139,7 +141,7 @@ func (s *Store) scanProject(query string, args ...interface{}) (*Project, error)
 		&p.CreatedAt, &p.UpdatedAt, &archivedAt,
 		&p.AutoDrive, &p.DriveIntervalMs, &p.ReportIntervalMs,
 		&p.ReportChannelID, &p.ReportThreadTS, &p.CurrentPhase,
-		&p.Phases, &p.AutoDriveUntil,
+		&p.Phases, &p.AutoDriveUntil, &phaseModelsJSON,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -155,6 +157,9 @@ func (s *Store) scanProject(query string, args ...interface{}) (*Project, error)
 	}
 	if archivedAt.Valid {
 		p.ArchivedAt = archivedAt.Int64
+	}
+	if phaseModelsJSON.Valid && phaseModelsJSON.String != "" {
+		_ = json.Unmarshal([]byte(phaseModelsJSON.String), &p.PhaseModels)
 	}
 	return p, nil
 }
@@ -185,13 +190,14 @@ func (s *Store) ListProjects(status, ownerID string) ([]*Project, error) {
 		p := &Project{}
 		var repoURL, activeSession sql.NullString
 		var archivedAt sql.NullInt64
+		var phaseModelsJSON sql.NullString
 		if err := rows.Scan(
 			&p.ID, &p.Slug, &p.Name, &p.Description, &repoURL,
 			&p.Status, &p.OwnerID, &activeSession, &p.SessionVersion,
 			&p.CreatedAt, &p.UpdatedAt, &archivedAt,
 			&p.AutoDrive, &p.DriveIntervalMs, &p.ReportIntervalMs,
 			&p.ReportChannelID, &p.ReportThreadTS, &p.CurrentPhase,
-			&p.Phases, &p.AutoDriveUntil,
+			&p.Phases, &p.AutoDriveUntil, &phaseModelsJSON,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan project: %w", err)
 		}
@@ -203,6 +209,9 @@ func (s *Store) ListProjects(status, ownerID string) ([]*Project, error) {
 		}
 		if archivedAt.Valid {
 			p.ArchivedAt = archivedAt.Int64
+		}
+		if phaseModelsJSON.Valid && phaseModelsJSON.String != "" {
+			_ = json.Unmarshal([]byte(phaseModelsJSON.String), &p.PhaseModels)
 		}
 		projects = append(projects, p)
 	}
@@ -223,13 +232,14 @@ func (s *Store) ListAutoDriveProjects() ([]*Project, error) {
 		p := &Project{}
 		var repoURL, activeSession sql.NullString
 		var archivedAt sql.NullInt64
+		var phaseModelsJSON sql.NullString
 		if err := rows.Scan(
 			&p.ID, &p.Slug, &p.Name, &p.Description, &repoURL,
 			&p.Status, &p.OwnerID, &activeSession, &p.SessionVersion,
 			&p.CreatedAt, &p.UpdatedAt, &archivedAt,
 			&p.AutoDrive, &p.DriveIntervalMs, &p.ReportIntervalMs,
 			&p.ReportChannelID, &p.ReportThreadTS, &p.CurrentPhase,
-			&p.Phases, &p.AutoDriveUntil,
+			&p.Phases, &p.AutoDriveUntil, &phaseModelsJSON,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan project: %w", err)
 		}
@@ -241,6 +251,9 @@ func (s *Store) ListAutoDriveProjects() ([]*Project, error) {
 		}
 		if archivedAt.Valid {
 			p.ArchivedAt = archivedAt.Int64
+		}
+		if phaseModelsJSON.Valid && phaseModelsJSON.String != "" {
+			_ = json.Unmarshal([]byte(phaseModelsJSON.String), &p.PhaseModels)
 		}
 		projects = append(projects, p)
 	}
@@ -256,6 +269,27 @@ func (s *Store) UpdateAutoDrive(projectID string, autoDrive bool, driveIntervalM
 	)
 	if err != nil {
 		return fmt.Errorf("failed to update auto-drive: %w", err)
+	}
+	return nil
+}
+
+// UpdatePhaseModels sets the model map for phases (phase → model alias).
+func (s *Store) UpdatePhaseModels(projectID string, phaseModels map[string]string) error {
+	var jsonStr string
+	if len(phaseModels) > 0 {
+		b, err := json.Marshal(phaseModels)
+		if err != nil {
+			return fmt.Errorf("failed to marshal phase models: %w", err)
+		}
+		jsonStr = string(b)
+	}
+	now := time.Now().UnixMilli()
+	_, err := s.ds.DB().Exec(
+		`UPDATE projects SET phase_models = ?, updated_at = ? WHERE id = ?`,
+		jsonStr, now, projectID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to update phase models: %w", err)
 	}
 	return nil
 }

@@ -124,6 +124,10 @@ func (r *Router) HandleMessage(ctx context.Context, channelID, userID, text, thr
 			r.handleReport(channelID, userID, threadTS, messageTS, cmd)
 			return
 
+		case CmdPhaseModel:
+			r.handlePhaseModel(channelID, userID, threadTS, messageTS, cmd)
+			return
+
 		case CmdContinueProject, CmdMessageProject:
 			// Check if slug matches a known project
 			proj, _ := r.store.GetProject(cmd.Slug)
@@ -407,6 +411,11 @@ func (r *Router) handleDrive(channelID, userID, threadTS, messageTS string, cmd 
 		return
 	}
 
+	// Save phase models if specified
+	if len(cmd.PhaseModels) > 0 {
+		_ = r.store.UpdatePhaseModels(proj.ID, cmd.PhaseModels)
+	}
+
 	// Refresh project and start driving
 	proj, _ = r.store.GetProjectByID(proj.ID)
 	if proj != nil {
@@ -573,6 +582,40 @@ func (r *Router) OnProjectArchive(channelID, threadTS, userID, slug string) {
 		return
 	}
 	r.respond(channelID, threadTS, "", fmt.Sprintf("📦 Project `%s` archived.", slug))
+}
+
+func (r *Router) handlePhaseModel(channelID, userID, threadTS, messageTS string, cmd *ProjectCommand) {
+	proj, _ := r.store.GetProject(cmd.Slug)
+	if proj == nil {
+		r.respond(channelID, threadTS, messageTS, fmt.Sprintf("Project `%s` not found.", cmd.Slug))
+		return
+	}
+
+	phase := cmd.Message    // phase name
+	model := cmd.PhaseModel // model alias
+
+	// Build updated phase models map
+	models := proj.PhaseModels
+	if models == nil {
+		models = make(map[string]string)
+	}
+
+	if model == "" || model == "default" {
+		delete(models, phase)
+	} else {
+		models[phase] = model
+	}
+
+	if err := r.store.UpdatePhaseModels(proj.ID, models); err != nil {
+		r.respond(channelID, threadTS, messageTS, fmt.Sprintf("⚠️ %s", err.Error()))
+		return
+	}
+
+	if model == "" || model == "default" {
+		r.respond(channelID, threadTS, messageTS, fmt.Sprintf("🔧 Phase `%s` will use default model.", phase))
+	} else {
+		r.respond(channelID, threadTS, messageTS, fmt.Sprintf("🔧 Phase `%s` → model `%s` for project `%s`.", phase, model, cmd.Slug))
+	}
 }
 
 func (r *Router) OnProjectResume(channelID, threadTS, userID, slug string) {

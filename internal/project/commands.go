@@ -22,6 +22,7 @@ const (
 	CmdPause
 	CmdPhase
 	CmdReport
+	CmdPhaseModel
 )
 
 // ProjectCommand represents a parsed project command.
@@ -34,7 +35,9 @@ type ProjectCommand struct {
 	DriveInterval  string
 	ReportInterval string
 	Phases         string
+	PhaseModels    map[string]string // phase → model alias
 	Duration       string
+	PhaseModel     string // for CmdPhaseModel: the model alias
 }
 
 var mentionRe = regexp.MustCompile(`<@[A-Z0-9]+>`)
@@ -119,6 +122,18 @@ func ParseCommand(text string) *ProjectCommand {
 			return cmd
 		}
 		return nil
+
+	case "phase-model":
+		// phase-model <slug> <phase> <model>
+		if len(parts) >= 4 {
+			return &ProjectCommand{
+				Type:       CmdPhaseModel,
+				Slug:       strings.ToLower(parts[1]),
+				Message:    parts[2], // phase name
+				PhaseModel: parts[3], // model alias
+			}
+		}
+		return nil
 	}
 
 	// Not a built-in command → could be a slug reference
@@ -165,7 +180,7 @@ func parseNewCommand(text string, parts []string) *ProjectCommand {
 			}
 		case "--phases":
 			if i+1 < len(parts) {
-				cmd.Phases = parts[i+1]
+				cmd.Phases, cmd.PhaseModels = parsePhaseModels(parts[i+1])
 			}
 		case "--duration":
 			if i+1 < len(parts) {
@@ -201,7 +216,7 @@ func parseDriveCommand(parts []string) *ProjectCommand {
 			}
 		case "--phases":
 			if i+1 < len(parts) {
-				cmd.Phases = parts[i+1]
+				cmd.Phases, cmd.PhaseModels = parsePhaseModels(parts[i+1])
 			}
 		case "--duration":
 			if i+1 < len(parts) {
@@ -211,4 +226,36 @@ func parseDriveCommand(parts []string) *ProjectCommand {
 	}
 
 	return cmd
+}
+
+// parsePhaseModels parses a phases string that may include model hints.
+// Format: "Analysis:opus,Design:sonnet,Implement" → phases string + model map
+// Phases without a model use the session default.
+func parsePhaseModels(s string) (phases string, models map[string]string) {
+	parts := strings.Split(s, ",")
+	var phaseList []string
+	models = make(map[string]string)
+
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if idx := strings.Index(p, ":"); idx != -1 {
+			phase := strings.TrimSpace(p[:idx])
+			model := strings.TrimSpace(p[idx+1:])
+			phaseList = append(phaseList, phase)
+			if model != "" {
+				models[phase] = model
+			}
+		} else {
+			phaseList = append(phaseList, p)
+		}
+	}
+
+	if len(models) == 0 {
+		models = nil
+	}
+
+	return strings.Join(phaseList, ","), models
 }

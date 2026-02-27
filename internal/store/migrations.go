@@ -14,7 +14,10 @@ func (s *Store) migrate() error {
 	if err := s.migrateV3(); err != nil {
 		return err
 	}
-	return s.migrateV4()
+	if err := s.migrateV4(); err != nil {
+		return err
+	}
+	return s.migrateV5()
 }
 
 func (s *Store) migrateV1() error {
@@ -243,6 +246,23 @@ func (s *Store) migrateV4() error {
 	}
 
 	if _, err := s.db.Exec(`INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '4')`); err != nil {
+		return fmt.Errorf("failed to update schema version: %w", err)
+	}
+
+	return nil
+}
+
+func (s *Store) migrateV5() error {
+	var version string
+	err := s.db.QueryRow(`SELECT value FROM meta WHERE key = 'schema_version'`).Scan(&version)
+	if err != nil || version >= "5" {
+		return nil
+	}
+
+	// Add phase_models column to projects table (JSON map of phase → model)
+	_, _ = s.db.Exec(`ALTER TABLE projects ADD COLUMN phase_models TEXT NOT NULL DEFAULT ''`)
+
+	if _, err := s.db.Exec(`INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '5')`); err != nil {
 		return fmt.Errorf("failed to update schema version: %w", err)
 	}
 

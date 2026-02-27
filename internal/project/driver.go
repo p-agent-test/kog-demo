@@ -170,6 +170,15 @@ Instructions:
 
 	d.logger.Info().Str("project", p.Slug).Str("phase", p.CurrentPhase).Msg("sending drive nudge")
 
+	// Switch model for this phase if configured, otherwise use session default
+	if p.PhaseModels != nil {
+		if model, ok := p.PhaseModels[p.CurrentPhase]; ok && model != "" {
+			modelCmd := fmt.Sprintf("/model %s", model)
+			d.bridge.HandleMessageWithSession(ctx, p.ReportChannelID, "auto-drive", modelCmd, p.ReportThreadTS, "", p.ActiveSession)
+			d.logger.Info().Str("phase", p.CurrentPhase).Str("model", model).Msg("switching model for phase")
+		}
+	}
+
 	d.bridge.HandleMessageWithSession(ctx, p.ReportChannelID, "auto-drive", nudge, p.ReportThreadTS, "", p.ActiveSession)
 
 	_ = d.store.TouchProject(p.Slug)
