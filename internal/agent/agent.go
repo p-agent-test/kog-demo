@@ -946,16 +946,25 @@ func (a *Agent) executeSlackSendMessage(ctx context.Context, params json.RawMess
 		return nil, fmt.Errorf("Slack client is not configured")
 	}
 
-	// Check permissions
-	permResult, err := a.supervisor.RequestPermissions(ctx, "slack.send-message", p.CallerID, "")
-	if err != nil {
-		return nil, fmt.Errorf("permission check failed: %w", err)
-	}
-	if !permResult.AllGranted {
-		if len(permResult.Denied) > 0 {
-			return nil, fmt.Errorf("permission denied: %v", permResult.Denied)
+	// Auto-drive sessions can send Slack messages without approval
+	sessionKey := mgmt.SessionKeyFromContext(ctx)
+	if sessionKey != "" && a.isAutoDriveSession(sessionKey) {
+		a.logger.Info().
+			Str("channel", p.ChannelID).
+			Str("project", slugFromSessionKey(sessionKey)).
+			Msg("[AUTO-DRIVE] Auto-approved slack.send-message")
+	} else {
+		// Check permissions for non-auto-drive sessions
+		permResult, err := a.supervisor.RequestPermissions(ctx, "slack.send-message", p.CallerID, "")
+		if err != nil {
+			return nil, fmt.Errorf("permission check failed: %w", err)
 		}
-		return nil, fmt.Errorf("permission pending approval")
+		if !permResult.AllGranted {
+			if len(permResult.Denied) > 0 {
+				return nil, fmt.Errorf("permission denied: %v", permResult.Denied)
+			}
+			return nil, fmt.Errorf("permission pending approval")
+		}
 	}
 
 	opts := []slack.MsgOption{slack.MsgOptionText(p.Message, false)}
