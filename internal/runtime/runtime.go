@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/p-blackswan/platform-agent/internal/consciousness"
 	"github.com/p-blackswan/platform-agent/internal/event"
 	"github.com/p-blackswan/platform-agent/internal/kogagent"
 )
@@ -42,11 +43,12 @@ func (r *broadcastRouter) Route(_ event.Event) []kogagent.Agent { return r.agent
 
 // Runtime is the main event loop. It wires sources → router → agents.
 type Runtime struct {
-	config  Config
-	sources []event.EventSource
-	router  Router
-	agents  []kogagent.Agent
-	logger  *slog.Logger
+	config           Config
+	sources          []event.EventSource
+	router           Router
+	agents           []kogagent.Agent
+	consciousnessLoop *consciousness.Loop
+	logger           *slog.Logger
 }
 
 // New creates a Runtime.
@@ -72,6 +74,12 @@ func (r *Runtime) SetRouter(router Router) {
 	r.router = router
 }
 
+// SetConsciousnessLoop attaches an autonomous thought loop to the runtime.
+// When set, the loop is started (via loop.Start) at the beginning of Run().
+func (r *Runtime) SetConsciousnessLoop(loop *consciousness.Loop) {
+	r.consciousnessLoop = loop
+}
+
 // Run starts the event loop. Blocks until ctx is cancelled.
 func (r *Runtime) Run(ctx context.Context) error {
 	if r.router == nil {
@@ -79,6 +87,15 @@ func (r *Runtime) Run(ctx context.Context) error {
 	}
 
 	eventCh := make(chan event.Event, r.config.EventBufferSize)
+
+	// Start consciousness loop (autonomous thought) if configured.
+	if r.consciousnessLoop != nil {
+		if err := r.consciousnessLoop.Start(ctx); err != nil {
+			r.logger.Error("consciousness loop failed to start", "err", err)
+		} else {
+			r.logger.Info("consciousness loop started")
+		}
+	}
 
 	// Start all event sources.
 	for _, src := range r.sources {
